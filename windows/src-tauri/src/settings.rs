@@ -16,14 +16,26 @@ pub struct Settings {
     pub screen: String,
     pub autostart: bool,
     pub hooks_installed: bool,
-    /// Claude model used by the chat. Changeable in the settings window.
+    /// Chat backend: anthropic, openrouter, deepseek or custom.
     /// Defaulted explicitly so a settings.json written by an older build still loads.
+    #[serde(default = "default_provider")]
+    pub provider: String,
+    /// Model id for the selected provider. Empty means "use the provider default".
     #[serde(default = "default_model")]
     pub model: String,
+    /// Base URL for the `custom` OpenAI-compatible provider.
+    #[serde(default)]
+    pub custom_base_url: String,
+}
+
+fn default_provider() -> String {
+    crate::providers::DEFAULT_PROVIDER_ID.to_string()
 }
 
 fn default_model() -> String {
-    crate::claude::DEFAULT_MODEL.to_string()
+    crate::providers::resolve(crate::providers::DEFAULT_PROVIDER_ID)
+        .default_model
+        .to_string()
 }
 
 impl Default for Settings {
@@ -42,7 +54,9 @@ impl Default for Settings {
             screen: "primary".into(),
             autostart: false,
             hooks_installed: false,
+            provider: default_provider(),
             model: default_model(),
+            custom_base_url: String::new(),
         }
     }
 }

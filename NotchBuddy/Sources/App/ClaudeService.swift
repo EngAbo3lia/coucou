@@ -64,6 +64,9 @@ final class KeychainStore: @unchecked Sendable {
         "anthropic-api-key",
         "google-api-key",
         "openai-api-key",
+        "openrouter-api-key",
+        "deepseek-api-key",
+        "custom-api-key",
         "resend-api-key", "resend-from",
         "n8n-url", "n8n-api-key",
         "vercel-token",
@@ -175,6 +178,31 @@ final class ClaudeService {
             .map { (id: $0.id, label: $0.id) }
     }
 
+    /// Fetches models from any OpenAI-compatible `/models` endpoint (OpenRouter,
+    /// DeepSeek, Ollama, LM Studio, vLLM, Groq…). Uses the provider's `name` when
+    /// it sends one (OpenRouter does), otherwise the id. Non-chat families out.
+    static func fetchOpenAICompatibleModels(baseURL: String, apiKey: String) async -> [(id: String, label: String)] {
+        let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !trimmed.isEmpty, let url = URL(string: "\(trimmed)/models") else { return [] }
+        var req = URLRequest(url: url, timeoutInterval: 10)
+        if !apiKey.isEmpty { req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization") }
+        guard let (data, response) = try? await URLSession.shared.data(for: req),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let items = json["data"] as? [[String: Any]] else { return [] }
+        let excluded = ["embed", "whisper", "tts", "dall-e", "audio", "moderat",
+                        "image", "sora", "realtime", "transcribe"]
+        var out: [(id: String, label: String)] = []
+        for item in items {
+            guard let id = item["id"] as? String else { continue }
+            let lower = id.lowercased()
+            guard !excluded.contains(where: { lower.contains($0) }) else { continue }
+            out.append((id: id, label: (item["name"] as? String) ?? id))
+        }
+        return out
+    }
+
     /// Chosen in Settings; falls back to the default when the field is left empty.
     private var model: String {
         let m = AppState.shared.claudeModel.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -256,18 +284,27 @@ final class ClaudeService {
     func chatOpenAICompatible(query: String, context: PromptContext?, state: AppState) async {
         let provider = state.chatProvider
         guard provider != .anthropic else { return }
-        guard let key = KeychainStore.shared.get(provider.keychainKey), !key.isEmpty else {
+        // A local custom endpoint (Ollama, LM Studio) may run without a key.
+        let key = KeychainStore.shared.get(provider.keychainKey) ?? ""
+        if !provider.needsBaseURL, key.isEmpty {
             await showError("\(provider.displayName) API key missing. Configure it in Settings.", state: state)
             return
         }
 
-        let baseURL: String
-        switch provider {
-        case .google:  baseURL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
-        case .openai:  baseURL = "https://api.openai.com/v1/chat/completions"
-        case .anthropic: return
+        let root: String
+        if provider.needsBaseURL {
+            root = state.customBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            if root.isEmpty {
+                await showError("Set the endpoint URL in Settings to use a custom model.", state: state)
+                return
+            }
+        } else if let fixed = provider.baseURL {
+            root = fixed
+        } else {
+            return
         }
-        guard let url = URL(string: baseURL) else { return }
+        let trimmedRoot = root.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard let url = URL(string: "\(trimmedRoot)/chat/completions") else { return }
 
         // Build messages: system + conversation history + new user turn
         var msgs: [[String: Any]] = [["role": "system", "content": systemPrompt]]
@@ -305,7 +342,7 @@ final class ClaudeService {
         var req = URLRequest(url: url, timeoutInterval: 30)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        if !key.isEmpty { req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization") }
         req.httpBody = try? JSONSerialization.data(withJSONObject: body)
 
         do {

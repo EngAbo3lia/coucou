@@ -1,17 +1,13 @@
-// Claude API client — the same integration as ClaudeService.swift: multi-turn
-// chat with web search, and files sent as document/image/text blocks.
+﻿// Anthropic Messages API client — the Claude backend of the chat.
 //
-// Everything happens here rather than in the island: the API key never leaves
-// the Credential Manager, and file bytes never cross the IPC boundary.
+// The conversation history and the provider routing live in chat.rs; this file
+// only knows how to talk to Anthropic: multi-turn messages with server-side web
+// search, plus the file-block helpers shared by the other backends.
+//
+// The API key never leaves Rust: the island only calls the commands in lib.rs.
 
-use std::sync::Mutex;
-
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::secrets;
-
-const ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 /// Server-side fallback: on a policy decline the API retries the same request on
 /// a fallback model inside the same call, so the island never shows a dead end.
@@ -20,111 +16,37 @@ const MAX_TOKENS: u32 = 4096;
 /// Text and code files are inlined; anything larger is skipped, as on macOS.
 const MAX_INLINE_TEXT: u64 = 200_000;
 
+/// Default Claude model for a fresh install.
 pub const DEFAULT_MODEL: &str = "claude-opus-5";
 
-const SYSTEM_PROMPT: &str = "You are Mochi, a personal AI assistant living at the top of the user's screen. \
-You have web search access and can help with absolutely anything — research, coding, finding places, recommendations, tasks, questions. \
-Respond in the user's language. Be thorough and complete — use as much detail as the task requires. \
-No markdown formatting (no **, no ##, no bullet dashes). Use plain text with line breaks.";
-
-#[derive(Default)]
-pub struct Chat {
-    /// Full multi-turn history, including tool_use / tool_result blocks.
-    messages: Mutex<Vec<Value>>,
-}
-
-impl Chat {
-    pub fn reset(&self) {
-        self.messages.lock().unwrap().clear();
-    }
-
-    fn is_empty(&self) -> bool {
-        self.messages.lock().unwrap().is_empty()
-    }
-
-    fn push(&self, message: Value) {
-        self.messages.lock().unwrap().push(message);
-    }
-
-    fn pop(&self) {
-        self.messages.lock().unwrap().pop();
-    }
-
-    fn snapshot(&self) -> Vec<Value> {
-        self.messages.lock().unwrap().clone()
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
-pub enum ChatContext {
-    File { name: String, path: String },
-    Window { app_name: String, title: String, url: Option<String> },
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ChatReply {
+/// The assistant's answer: its text, and the raw content blocks so the next turn
+/// can echo tool_use / web_search results back to the model.
+pub struct Reply {
     pub text: String,
+    pub blocks: Vec<Value>,
 }
 
-/// One chat turn. Returns the assistant's text, or a message the island shows
-/// in the note view.
-pub async fn send(
-    chat: &Chat,
+/// One Anthropic turn. `messages` is already in Anthropic's `{role, content}` shape.
+pub async fn chat(
+    base_url: &str,
     model: &str,
-    query: String,
-    context: Option<ChatContext>,
-) -> Result<ChatReply, String> {
-    let key = secrets::get("anthropic-api-key")
-        .ok_or_else(|| "API key missing. Open settings.".to_string())?;
-
-    let mut content: Vec<Value> = Vec::new();
-
-    // File / window context rides along with the first message only, exactly
-    // like ClaudeService.chat().
-    if chat.is_empty() {
-        match &context {
-            Some(ChatContext::File { name, path }) => {
-                if let Some(block) = file_block(path) {
-                    content.push(block);
-                }
-                content.push(json!({ "type": "text", "text": format!("File: {name}") }));
-            }
-            Some(ChatContext::Window { app_name, title, url }) => {
-                let mut text = format!("Context — App: {app_name}, Window: {title}");
-                if let Some(url) = url {
-                    text.push_str(&format!(", URL: {url}"));
-                }
-                content.push(json!({ "type": "text", "text": text }));
-            }
-            None => {}
-        }
-    }
-    content.push(json!({ "type": "text", "text": query }));
-
-    chat.push(json!({ "role": "user", "content": content }));
-
+    key: &str,
+    system: &str,
+    messages: &[Value],
+) -> Result<Reply, String> {
     let body = json!({
         "model": model,
         "max_tokens": MAX_TOKENS,
-        "system": SYSTEM_PROMPT,
+        "system": system,
         "tools": [{ "type": "web_search_20260209", "name": "web_search", "max_uses": 5 }],
         "fallbacks": "default",
-        "messages": chat.snapshot(),
+        "messages": messages,
     });
 
-    let response = match call(&key, &body).await {
-        Ok(v) => v,
-        Err(err) => {
-            chat.pop(); // keep the history consistent with what the model saw
-            return Err(err);
-        }
-    };
+    let response = call(base_url, key, &body).await?;
 
     // A policy decline comes back as HTTP 200 with stop_reason "refusal".
     if response.get("stop_reason").and_then(Value::as_str) == Some("refusal") {
-        chat.pop();
         let why = response
             .get("stop_details")
             .and_then(|d| d.get("explanation"))
@@ -134,13 +56,8 @@ pub async fn send(
     }
 
     let Some(blocks) = response.get("content").and_then(Value::as_array).cloned() else {
-        chat.pop();
         return Err("Unexpected API response.".into());
     };
-
-    // Store the whole content — tool_use / tool_result blocks included — so the
-    // next turn has the right context.
-    chat.push(json!({ "role": "assistant", "content": blocks.clone() }));
 
     let text = blocks
         .iter()
@@ -154,17 +71,17 @@ pub async fn send(
     if text.is_empty() {
         return Err("No response text.".into());
     }
-    Ok(ChatReply { text })
+    Ok(Reply { text, blocks })
 }
 
-async fn call(key: &str, body: &Value) -> Result<Value, String> {
+async fn call(base_url: &str, key: &str, body: &Value) -> Result<Value, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(90))
         .build()
         .map_err(|e| e.to_string())?;
 
     let response = client
-        .post(ENDPOINT)
+        .post(format!("{base_url}/v1/messages"))
         .header("x-api-key", key)
         .header("anthropic-version", ANTHROPIC_VERSION)
         .header("anthropic-beta", FALLBACK_BETA)
@@ -192,38 +109,84 @@ async fn call(key: &str, body: &Value) -> Result<Value, String> {
     serde_json::from_str(&text).map_err(|e| format!("Bad API response: {e}"))
 }
 
+/// Live model list for the Anthropic picker.
+pub async fn models(base_url: &str, key: &str) -> Result<Vec<Value>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let response = client
+        .get(format!("{base_url}/v1/models?limit=100"))
+        .header("x-api-key", key)
+        .header("anthropic-version", ANTHROPIC_VERSION)
+        .send()
+        .await
+        .map_err(|e| format!("Network error: {e}"))?;
+    let status = response.status();
+    let text = response.text().await.map_err(|e| e.to_string())?;
+    if !status.is_success() {
+        return Err(format!("Anthropic {status}"));
+    }
+    let json: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    let items = json.get("data").and_then(Value::as_array).cloned().unwrap_or_default();
+    Ok(items
+        .iter()
+        .filter_map(|item| {
+            let id = item.get("id").and_then(Value::as_str)?;
+            let label = item.get("display_name").and_then(Value::as_str).unwrap_or(id);
+            Some(json!({ "id": id, "label": label }))
+        })
+        .collect())
+}
+
 /// PDF → document block, image → image block, text/code → inline text.
 /// Mirrors readFileAsBlock() in ClaudeService.swift.
-fn file_block(path: &str) -> Option<Value> {
-    let ext = std::path::Path::new(path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-
-    let media_type = match ext.as_str() {
-        "pdf" => Some(("document", "application/pdf")),
-        "jpg" | "jpeg" => Some(("image", "image/jpeg")),
-        "png" => Some(("image", "image/png")),
-        "gif" => Some(("image", "image/gif")),
-        "webp" => Some(("image", "image/webp")),
-        _ => None,
-    };
-
-    if let Some((block_type, media)) = media_type {
+pub fn file_block(path: &str) -> Option<Value> {
+    if let Some((block_type, media)) = binary_media_type(path) {
         let bytes = std::fs::read(path).ok()?;
         return Some(json!({
             "type": block_type,
             "source": { "type": "base64", "media_type": media, "data": base64(&bytes) },
         }));
     }
+    let text = inline_file_text(path)?;
+    Some(json!({ "type": "text", "text": format!("File contents:\n{text}") }))
+}
 
+/// `(block_type, media_type)` for files sent as binary, or None for text.
+pub fn binary_media_type(path: &str) -> Option<(&'static str, &'static str)> {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    match ext.as_str() {
+        "pdf" => Some(("document", "application/pdf")),
+        "jpg" | "jpeg" => Some(("image", "image/jpeg")),
+        "png" => Some(("image", "image/png")),
+        "gif" => Some(("image", "image/gif")),
+        "webp" => Some(("image", "image/webp")),
+        _ => None,
+    }
+}
+
+/// `(media_type, base64)` for image files only — used to build image_url parts.
+pub fn image_data_uri(path: &str) -> Option<(&'static str, String)> {
+    let (block_type, media) = binary_media_type(path)?;
+    if block_type != "image" {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    Some((media, base64(&bytes)))
+}
+
+/// Inlines a text/code file up to the size cap, or None.
+pub fn inline_file_text(path: &str) -> Option<String> {
     let len = std::fs::metadata(path).ok()?.len();
     if len > MAX_INLINE_TEXT {
         return None;
     }
-    let text = std::fs::read_to_string(path).ok()?;
-    Some(json!({ "type": "text", "text": format!("File contents:\n{text}") }))
+    std::fs::read_to_string(path).ok()
 }
 
 /// Small standalone base64 encoder — not worth another dependency.

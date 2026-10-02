@@ -134,6 +134,31 @@ island's `tool_name` / `session_id`.
 | `PostInvocation` | `PostToolUse` |
 | `Stop` | `Stop` |
 
+### opencode
+
+Coucou ships an opencode plugin that forwards session and tool events to the
+island. Copy [`integrations/opencode/coucou.js`](../integrations/opencode/coucou.js)
+into opencode's global plugin directory:
+
+```sh
+mkdir -p ~/.config/opencode/plugins
+cp integrations/opencode/coucou.js ~/.config/opencode/plugins/coucou.js
+```
+
+On Windows the folder is `%USERPROFILE%\.config\opencode\plugins\`. opencode loads
+it at startup; an **opencode** pill then appears next to Claude Code while a
+session runs. The plugin tags every event with `coucou_agent: "opencode"` and
+never blocks opencode — if Coucou is closed the sends are dropped.
+
+| opencode event | Canonical event |
+|---|---|
+| `session.created` | `SessionStart` |
+| `message.updated` (user) | `UserPromptSubmit` |
+| `tool.execute.before` | `PreToolUse` |
+| `tool.execute.after` | `PostToolUse` |
+| `session.idle` | `Stop` |
+| `session.error` | `StopFailure` |
+
 ### Any other tool
 
 Follow the generic pattern: call `nb-hook --agent <your-name> <EventName>` (macOS),

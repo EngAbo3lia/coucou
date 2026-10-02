@@ -52,6 +52,9 @@ struct SettingsView: View {
     // Multi-provider chat keys
     @State private var googleKey: String  = KeychainStore.shared.get("google-api-key") ?? ""
     @State private var openAIKey: String  = KeychainStore.shared.get("openai-api-key") ?? ""
+    @State private var openRouterKey: String = KeychainStore.shared.get("openrouter-api-key") ?? ""
+    @State private var deepSeekKey: String   = KeychainStore.shared.get("deepseek-api-key") ?? ""
+    @State private var customKey: String     = KeychainStore.shared.get("custom-api-key") ?? ""
 
     // Integration keys
     @State private var resendKey: String    = KeychainStore.shared.get("resend-api-key")  ?? ""
@@ -130,7 +133,7 @@ struct SettingsView: View {
 
                 GroupBox("Chat — other providers") {
                     VStack(alignment: .leading, spacing: 12) {
-                        Text("To use Google Gemini or OpenAI from the chat. Keys are stored in the Keychain.")
+                        Text("Use any model from the chat: Google, OpenAI, OpenRouter (DeepSeek, Llama, Qwen, Mistral…), DeepSeek, or your own OpenAI-compatible endpoint (Ollama, LM Studio, vLLM). Keys are stored in the Keychain.")
                             .font(.system(size: 12))
                             .foregroundColor(.secondary)
 
@@ -157,6 +160,54 @@ struct SettingsView: View {
                         Button("Save") {
                             KeychainStore.shared.set("openai-api-key", value: openAIKey)
                             statusMessage = "✓ OpenAI key saved."
+                        }
+                        .buttonStyle(.borderedProminent)
+
+                        Divider()
+
+                        HStack(spacing: 8) {
+                            Circle().fill(Color(hex: "#6467F2")).frame(width: 8, height: 8)
+                            Text("OpenRouter").font(.system(size: 12, weight: .semibold))
+                        }
+                        SecureField("API key (sk-or-…)", text: $openRouterKey)
+                            .textFieldStyle(.roundedBorder)
+                        Button("Save") {
+                            KeychainStore.shared.set("openrouter-api-key", value: openRouterKey)
+                            statusMessage = "✓ OpenRouter key saved."
+                        }
+                        .buttonStyle(.borderedProminent)
+                        Text("One key for DeepSeek, Llama, Qwen, Mistral, Claude, GPT and hundreds more.")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+
+                        Divider()
+
+                        HStack(spacing: 8) {
+                            Circle().fill(Color(hex: "#4D6BFE")).frame(width: 8, height: 8)
+                            Text("DeepSeek").font(.system(size: 12, weight: .semibold))
+                        }
+                        SecureField("API key (sk-…)", text: $deepSeekKey)
+                            .textFieldStyle(.roundedBorder)
+                        Button("Save") {
+                            KeychainStore.shared.set("deepseek-api-key", value: deepSeekKey)
+                            statusMessage = "✓ DeepSeek key saved."
+                        }
+                        .buttonStyle(.borderedProminent)
+
+                        Divider()
+
+                        HStack(spacing: 8) {
+                            Circle().fill(Color(hex: "#22C55E")).frame(width: 8, height: 8)
+                            Text("Custom endpoint").font(.system(size: 12, weight: .semibold))
+                        }
+                        TextField("Base URL (e.g. http://localhost:11434/v1)",
+                                  text: $state.customBaseURL)
+                            .textFieldStyle(.roundedBorder)
+                        SecureField("API key (optional for local servers)", text: $customKey)
+                            .textFieldStyle(.roundedBorder)
+                        Button("Save") {
+                            KeychainStore.shared.set("custom-api-key", value: customKey)
+                            statusMessage = "✓ Custom endpoint saved."
                         }
                         .buttonStyle(.borderedProminent)
                     }

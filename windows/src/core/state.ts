@@ -90,8 +90,12 @@ export interface Settings {
   screen: "primary" | "cursor";
   autostart: boolean;
   hooksInstalled: boolean;
-  /** Claude model used by the chat. */
+  /** Chat backend: anthropic, openrouter, deepseek or custom. */
+  provider: string;
+  /** Model id for the selected provider. Empty means "use the provider default". */
   model: string;
+  /** Base URL for the `custom` OpenAI-compatible provider. */
+  customBaseUrl: string;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -105,7 +109,9 @@ export const DEFAULT_SETTINGS: Settings = {
   screen: "primary",
   autostart: false,
   hooksInstalled: false,
+  provider: "anthropic",
   model: "claude-opus-5",
+  customBaseUrl: "",
 };
 
 type Listener = () => void;

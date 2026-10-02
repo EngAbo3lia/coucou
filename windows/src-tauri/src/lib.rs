@@ -1,13 +1,16 @@
 // Coucou for Windows — app wiring and the commands the island calls.
 
+mod chat;
 mod claude;
 mod files;
 mod hooks;
 mod integrations;
 mod island;
 mod log;
+mod openai;
 mod pipe;
 mod platform;
+mod providers;
 mod secrets;
 mod settings;
 mod tray;
@@ -17,14 +20,16 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
+use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_autostart::{ManagerExt, MacosLauncher};
 
-use claude::{Chat, ChatContext, ChatReply};
+use chat::{Chat, ChatContext, ChatReply};
 use files::DroppedFile;
 use hooks::{HookPreview, HookStatus};
 use island::{PollGate, ScreenInfo};
 use pipe::Pending;
+use providers::ProviderInfo;
 use settings::Settings;
 
 pub struct Shared {
@@ -241,13 +246,29 @@ async fn chat_send(
     query: String,
     context: Option<ChatContext>,
 ) -> Result<ChatReply, String> {
-    let model = shared.settings.lock().unwrap().model.clone();
-    claude::send(&chat, &model, query, context).await
+    let (provider, model, custom_base_url) = {
+        let s = shared.settings.lock().unwrap();
+        (s.provider.clone(), s.model.clone(), s.custom_base_url.clone())
+    };
+    chat::send(&chat, &provider, &model, &custom_base_url, query, context).await
 }
 
 #[tauri::command]
 fn chat_reset(chat: State<Chat>) {
     chat.reset();
+}
+
+/// The chat backends the settings window can offer (id, name, accent, …).
+#[tauri::command]
+fn chat_providers() -> Vec<ProviderInfo> {
+    providers::all_info()
+}
+
+/// Live model list for one provider, for the picker in the settings window.
+#[tauri::command]
+async fn provider_models(shared: State<'_, Shared>, provider_id: String) -> Result<Vec<Value>, String> {
+    let custom_base_url = shared.settings.lock().unwrap().custom_base_url.clone();
+    chat::list_models(&provider_id, &custom_base_url).await
 }
 
 /// Copies a dropped file into the inbox and reports its name back.
@@ -393,6 +414,8 @@ pub fn run() {
             log_line,
             chat_send,
             chat_reset,
+            chat_providers,
+            provider_models,
             ingest_file,
             secret_present,
             secret_set,

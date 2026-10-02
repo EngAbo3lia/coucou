@@ -85,6 +85,11 @@ export const Bridge = {
   chatSend: (query: string, context: ChatContext | null) =>
     callOrThrow<{ text: string }>("chat_send", { query, context }),
   chatReset: () => call<void>("chat_reset"),
+  /** The chat backends Rust can talk to (single source of truth in providers.rs). */
+  chatProviders: () => call<ProviderInfo[]>("chat_providers"),
+  /** Live model list for one provider, for the settings picker. */
+  providerModels: (providerId: string) =>
+    callOrThrow<ModelInfo[]>("provider_models", { providerId }),
   /** Copies a dropped file into the inbox. */
   ingestFile: (path: string) => callOrThrow<DroppedFile>("ingest_file", { path }),
   /** Only ever tells you whether a key exists — never its value. */
@@ -100,6 +105,23 @@ export const Bridge = {
   /** Tray → Pause. Stops the integration pollers, not just the island. */
   setPaused: (paused: boolean) => call<void>("set_paused", { paused }),
 };
+
+export interface ProviderInfo {
+  id: string;
+  name: string;
+  accent: string;
+  defaultModel: string;
+  /** Credential Manager key that holds this provider's API key. */
+  key: string;
+  keyRequired: boolean;
+  /** "anthropic" or "openai" — the API dialect. */
+  style: string;
+}
+
+export interface ModelInfo {
+  id: string;
+  label: string;
+}
 
 export interface IntegrationUpdate {
   id: string;

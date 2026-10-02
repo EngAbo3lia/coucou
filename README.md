@@ -137,7 +137,7 @@ Click the Coucou icon in the menu bar (macOS) or in the system tray (Windows, Li
 | **Google AI API key** *(macOS)* | chat with Google AI (Gemini) | Settings → Chat — other providers · Keychain |
 | **OpenAI API key** *(macOS)* | chat with OpenAI | Settings → Chat — other providers · Keychain |
 | **OpenRouter / DeepSeek / custom endpoint** | chat with any open-source or hosted model | Settings → AI chat (Windows) / Chat — other providers (macOS) · Keychain / Credential Manager / Secret Service |
-| **opencode plugin** | opencode sessions in the island | Copy [`integrations/opencode/coucou.js`](integrations/opencode/coucou.js) to `~/.config/opencode/plugins/` |
+| **opencode plugin** | opencode sessions in the island | Settings → **opencode** → **Install hooks** (writes `~/.config/opencode/plugins/coucou.js`) |
 | **Active pills** *(macOS)* | choose which tools and agents appear in the island | Settings → Active pills |
 | Stripe, n8n, GitHub, Vercel, Resend, Notion, Cal.com | the service pills | Keychain / Windows Credential Manager / Secret Service, all optional |
 

@@ -8,6 +8,7 @@ mod integrations;
 mod island;
 mod log;
 mod openai;
+mod opencode;
 mod pipe;
 mod platform;
 mod providers;
@@ -216,6 +217,25 @@ fn hooks_apply(
     Ok(backup)
 }
 
+// ── opencode integration ──────────────────────────────────────────────────────
+
+#[tauri::command]
+fn opencode_status() -> opencode::OpenCodeStatus {
+    opencode::status()
+}
+
+/// Copies Coucou's opencode plugin into the user's opencode config.
+#[tauri::command]
+fn opencode_install() -> Result<String, String> {
+    opencode::install()
+}
+
+/// Removes Coucou's plugin — only when it is still ours.
+#[tauri::command]
+fn opencode_uninstall() -> Result<(), String> {
+    opencode::uninstall()
+}
+
 #[tauri::command]
 fn approval_decision(app: AppHandle, request_id: String, decision: String) {
     pipe::answer(&app, &request_id, &decision);
@@ -408,6 +428,9 @@ pub fn run() {
             hooks_status,
             hooks_preview,
             hooks_apply,
+            opencode_status,
+            opencode_install,
+            opencode_uninstall,
             approval_decision,
             approval_ack,
             approval_decline,

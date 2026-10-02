@@ -73,6 +73,12 @@ export const Bridge = {
   hooksApply: (install: boolean, fingerprint: string) =>
     callOrThrow<string>("hooks_apply", { install, fingerprint }),
 
+  // ── opencode integration ──────────────────────────────────────────────────
+  openCodeStatus: () => call<OpenCodeStatus>("opencode_status"),
+  /** Copies Coucou's plugin into the opencode config; returns a backup path. */
+  openCodeInstall: () => callOrThrow<string>("opencode_install"),
+  openCodeUninstall: () => callOrThrow<void>("opencode_uninstall"),
+
   approvalDecision: (requestId: string, decision: "allow" | "deny") =>
     call<void>("approval_decision", { requestId, decision }),
   /** "The card is up" — until this lands the relay only waits a moment. */
@@ -105,6 +111,14 @@ export const Bridge = {
   /** Tray → Pause. Stops the integration pollers, not just the island. */
   setPaused: (paused: boolean) => call<void>("set_paused", { paused }),
 };
+
+export interface OpenCodeStatus {
+  installed: boolean;
+  /** False when the installed plugin differs from the one this build ships. */
+  upToDate: boolean;
+  pluginPath: string;
+  configDir: string;
+}
 
 export interface ProviderInfo {
   id: string;

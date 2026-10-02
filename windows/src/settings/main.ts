@@ -3,7 +3,7 @@
 // integrations land here too in a later stage.
 
 import "./settings.css";
-import { Bridge, onEvent, type HookStatus, type ModelInfo, type ProviderInfo } from "../core/bridge";
+import { Bridge, onEvent, type HookStatus, type ModelInfo, type OpenCodeStatus, type ProviderInfo } from "../core/bridge";
 import { DEFAULT_SETTINGS, type Settings } from "../core/state";
 import { h, clear } from "../views/dom";
 
@@ -165,6 +165,93 @@ function claudeSection(status: HookStatus): HTMLElement {
       text: "Cancel",
       onclick: () => { clear(body); draw(); },
     })));
+  }
+
+  draw();
+  return section;
+}
+
+// ── opencode section ──────────────────────────────────────────────────────────
+//
+// opencode uses plugins, not hooks. "Installing the hooks" copies Coucou's
+// plugin into ~/.config/opencode/plugins/ so opencode sessions get a pill.
+
+function opencodeSection(status: OpenCodeStatus): HTMLElement {
+  const body = h("div", { style: "display:flex;flex-direction:column;gap:12px" });
+  const section = h("section", {}, h("h2", {}, statusDot(status.installed), h("span", { text: "opencode" })), body);
+
+  async function rebuild() {
+    const fresh = await Bridge.openCodeStatus();
+    if (fresh) Object.assign(status, fresh);
+    const head = section.querySelector("h2")!;
+    clear(head);
+    head.append(statusDot(status.installed), h("span", { text: "opencode" }));
+    draw();
+  }
+
+  function draw() {
+    clear(body);
+    body.append(
+      h("div", {
+        class: "hint",
+        text: status.installed
+          ? "Coucou's plugin is installed. Restart opencode once — your sessions then show up in the island and get their own pill."
+          : "Install the plugin so your opencode sessions show up in the island, the same way Claude Code does. opencode loads it from its config folder.",
+      }),
+      h("div", { class: "row" },
+        h("label", { text: "Plugin" }),
+        h("span", { class: "path", text: status.pluginPath || "—" }),
+      ),
+    );
+
+    if (status.installed && !status.upToDate) {
+      body.append(h("div", {
+        class: "notice warn",
+        text: "A different coucou.js is installed. Reinstall to update it to this build's version.",
+      }));
+    }
+
+    const actions = h("div", { class: "row" });
+    const install = h("button", {
+      class: "primary",
+      text: status.installed ? "Reinstall plugin" : "Install hooks",
+    });
+    install.addEventListener("click", async () => {
+      install.disabled = true;
+      try {
+        const backup = await Bridge.openCodeInstall();
+        clear(body);
+        body.append(h("div", {
+          class: "notice ok",
+          text: backup
+            ? `Installed. Previous file saved as ${backup}. Restart opencode to pick it up.`
+            : "Installed. Restart opencode to pick it up.",
+        }));
+        window.setTimeout(() => void rebuild(), 2600);
+      } catch (err) {
+        install.disabled = false;
+        body.append(h("div", { class: "notice err", text: `Could not install: ${String(err)}` }));
+      }
+    });
+    actions.append(install);
+
+    if (status.installed) {
+      const remove = h("button", { class: "danger", text: "Uninstall plugin" });
+      remove.addEventListener("click", async () => {
+        remove.disabled = true;
+        try {
+          await Bridge.openCodeUninstall();
+          clear(body);
+          body.append(h("div", { class: "notice ok", text: "Plugin removed. Restart opencode." }));
+          window.setTimeout(() => void rebuild(), 2600);
+        } catch (err) {
+          remove.disabled = false;
+          body.append(h("div", { class: "notice err", text: `Could not remove: ${String(err)}` }));
+        }
+      });
+      actions.append(remove);
+    }
+    body.append(actions);
   }
 
   draw();
@@ -588,10 +675,15 @@ async function main() {
   const present: Record<string, boolean> = {};
   for (const k of keys) present[k] = (await Bridge.secretPresent(k)) ?? false;
 
+  const opencode = (await Bridge.openCodeStatus()) ?? {
+    installed: false, upToDate: false, pluginPath: "", configDir: "",
+  };
+
   clear(root);
   root.append(
     h("h1", {}, h("span", { text: "Coucou" }), h("span", { class: "version", text: version })),
     claudeSection(status),
+    opencodeSection(opencode),
     chatSection(providers, present),
     integrationsSection(present),
     generalSection(),

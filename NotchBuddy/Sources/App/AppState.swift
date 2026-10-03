@@ -69,6 +69,19 @@ final class AppState: ObservableObject {
     @Published var openAIChatModel: String = ChatProvider.openai.defaultModel {
         didSet { UserDefaults.standard.set(openAIChatModel, forKey: "openAIChatModel") }
     }
+    @Published var openRouterChatModel: String = ChatProvider.openRouter.defaultModel {
+        didSet { UserDefaults.standard.set(openRouterChatModel, forKey: "openRouterChatModel") }
+    }
+    @Published var deepSeekChatModel: String = ChatProvider.deepSeek.defaultModel {
+        didSet { UserDefaults.standard.set(deepSeekChatModel, forKey: "deepSeekChatModel") }
+    }
+    @Published var customChatModel: String = ChatProvider.custom.defaultModel {
+        didSet { UserDefaults.standard.set(customChatModel, forKey: "customChatModel") }
+    }
+    /// Base URL for the `custom` OpenAI-compatible provider (Ollama, vLLM, LM Studio…).
+    @Published var customBaseURL: String = "" {
+        didSet { UserDefaults.standard.set(customBaseURL, forKey: "customBaseURL") }
+    }
 
     // The always-on workspace pill (default: VS Code). Persisted.
     @Published var mainPillId: String = PillCatalog.defaultMainPillId {
@@ -85,8 +98,14 @@ final class AppState: ObservableObject {
     func fetchModelsIfNeeded(for provider: ChatProvider) {
         guard !loadingProviderModels.contains(provider),
               fetchedProviderModels[provider] == nil else { return }
-        guard let apiKey = KeychainStore.shared.get(provider.keychainKey), !apiKey.isEmpty else {
+        let storedKey = KeychainStore.shared.get(provider.keychainKey) ?? ""
+        if !provider.needsBaseURL, storedKey.isEmpty {
             providerModelFetchError[provider] = "No API key — add it in Settings."
+            return
+        }
+        let endpoint = customBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if provider.needsBaseURL, endpoint.isEmpty {
+            providerModelFetchError[provider] = "Set the endpoint URL in Settings."
             return
         }
         loadingProviderModels.insert(provider)
@@ -94,9 +113,15 @@ final class AppState: ObservableObject {
         Task {
             let models: [(id: String, label: String)]
             switch provider {
-            case .anthropic: models = await ClaudeService.fetchModels(apiKey: apiKey)
-            case .google:    models = await ClaudeService.fetchGoogleModels(apiKey: apiKey)
-            case .openai:    models = await ClaudeService.fetchOpenAIModels(apiKey: apiKey)
+            case .anthropic:  models = await ClaudeService.fetchModels(apiKey: storedKey)
+            case .google:     models = await ClaudeService.fetchGoogleModels(apiKey: storedKey)
+            case .openai:     models = await ClaudeService.fetchOpenAIModels(apiKey: storedKey)
+            case .openRouter: models = await ClaudeService.fetchOpenAICompatibleModels(
+                                  baseURL: ChatProvider.openRouter.baseURL ?? "", apiKey: storedKey)
+            case .deepSeek:   models = await ClaudeService.fetchOpenAICompatibleModels(
+                                  baseURL: ChatProvider.deepSeek.baseURL ?? "", apiKey: storedKey)
+            case .custom:     models = await ClaudeService.fetchOpenAICompatibleModels(
+                                  baseURL: endpoint, apiKey: storedKey)
             }
             loadingProviderModels.remove(provider)
             if models.isEmpty {
@@ -118,6 +143,18 @@ final class AppState: ObservableObject {
                     if !models.contains(where: { $0.id == openAIChatModel }) {
                         openAIChatModel = models.first(where: { $0.id.contains("mini") })?.id ?? models.first!.id
                     }
+                case .openRouter:
+                    if !models.contains(where: { $0.id == openRouterChatModel }) {
+                        openRouterChatModel = models.first(where: { $0.id.contains("deepseek") })?.id ?? models.first!.id
+                    }
+                case .deepSeek:
+                    if !models.contains(where: { $0.id == deepSeekChatModel }) {
+                        deepSeekChatModel = models.first(where: { $0.id.contains("chat") })?.id ?? models.first!.id
+                    }
+                case .custom:
+                    if !models.contains(where: { $0.id == customChatModel }) {
+                        customChatModel = models.first!.id
+                    }
                 }
             }
         }
@@ -126,9 +163,12 @@ final class AppState: ObservableObject {
     /// The model currently active for chat (provider-aware).
     var activeChatModel: String {
         switch chatProvider {
-        case .anthropic: return claudeModel
-        case .google:    return googleChatModel
-        case .openai:    return openAIChatModel
+        case .anthropic:  return claudeModel
+        case .google:     return googleChatModel
+        case .openai:     return openAIChatModel
+        case .openRouter: return openRouterChatModel
+        case .deepSeek:   return deepSeekChatModel
+        case .custom:     return customChatModel
         }
     }
 
@@ -251,6 +291,10 @@ final class AppState: ObservableObject {
         if let v = ud.string(forKey: "chatProvider"), let p = ChatProvider(rawValue: v) { chatProvider = p }
         if let v = ud.string(forKey: "googleChatModel"), !v.isEmpty { googleChatModel = v }
         if let v = ud.string(forKey: "openAIChatModel"), !v.isEmpty { openAIChatModel = v }
+        if let v = ud.string(forKey: "openRouterChatModel"), !v.isEmpty { openRouterChatModel = v }
+        if let v = ud.string(forKey: "deepSeekChatModel"), !v.isEmpty { deepSeekChatModel = v }
+        if let v = ud.string(forKey: "customChatModel"), !v.isEmpty { customChatModel = v }
+        if let v = ud.string(forKey: "customBaseURL"), !v.isEmpty { customBaseURL = v }
         // Migrate old 60s default → 15s
         if let v = ud.object(forKey: "autoCloseInterval") as? Double {
             autoCloseInterval = (v == 60) ? 15 : v

@@ -10,7 +10,7 @@ import {
   type IslandMode, type IslandViewName,
 } from "../core/layout";
 import { Sound } from "../core/sound";
-import { State } from "../core/state";
+import { State, type AgentTask } from "../core/state";
 import { BotEngine, hexToRGB } from "../mochi/engine";
 import { Greeting } from "../mochi/greeting";
 import { createMiniBot, pruneMiniBots, syncMiniBotStates, tickMiniBots } from "../mochi/minibots";
@@ -31,6 +31,29 @@ const UPLOAD_VIEWS: ReadonlySet<IslandViewName> = new Set(["upload", "uploading"
 const PRE_PROGRESS = USC.T_PROG_START - USC.T_DROP;
 
 const modeOrder = (m: IslandMode) => (m === "hidden" ? 0 : m === "compact" ? 1 : 2);
+
+/** A dynamic third-party agent pill (agent_opencode, agent_gemini…). */
+function isAgentPill(task: AgentTask): boolean {
+  return task.id.startsWith("agent_");
+}
+
+/**
+ * Opens whatever the focused pill points at. An opencode session is resumed
+ * (or its window brought forward); Claude Code keeps opening VS Code; n8n opens
+ * its workflow. The old fixed `openInVSCode` made every agent lie about itself.
+ */
+function openAgentTarget(task: AgentTask | null): void {
+  if (!task) return;
+  if (isAgentPill(task)) {
+    if (task.sessionId) void Bridge.opencodeContinue(task.sessionId, task.sessionCwd ?? "");
+    return;
+  }
+  if (task.id === "integration_n8n") {
+    void Bridge.openN8n();
+    return;
+  }
+  void Bridge.openInVSCode(task.sessionCwd ?? null);
+}
 
 export class Island {
   readonly fsm = new IslandStateMachine();
@@ -111,10 +134,7 @@ export class Island {
         State.setFocus(id);
         Sound.play("blip");
       },
-      openTerminal: () => {
-        const cwd = State.focusTask?.sessionCwd ?? null;
-        void Bridge.openInVSCode(cwd);
-      },
+      openTerminal: () => openAgentTarget(State.focusTask),
       // The ↗ button — same targets as openAgentTarget() on macOS.
       openTarget: () => {
         const task = State.focusTask;
@@ -127,9 +147,20 @@ export class Island {
           integration_notion: "https://notion.so",
           integration_calcom: "https://app.cal.com/bookings",
         };
-        if (task.id === "integration_claude") void Bridge.openInVSCode(task.sessionCwd ?? null);
+        if (isAgentPill(task)) openAgentTarget(task);
+        else if (task.id === "integration_claude") void Bridge.openInVSCode(task.sessionCwd ?? null);
         else if (task.id === "integration_n8n") void Bridge.openN8n();
         else if (urls[task.id]) void Bridge.openUrl(urls[task.id]);
+      },
+      // Continue an opencode session: either point the island chat at it, or
+      // hand it back to opencode's own window.
+      continueSession: (session, mode) => {
+        if (mode === "chat") {
+          State.setChatTarget(session);
+          this.setView("prompt");
+        } else {
+          void Bridge.opencodeContinue(session.sessionId, session.directory);
+        }
       },
       openUrl: (url) => {
         if (url) void Bridge.openUrl(url);

@@ -195,6 +195,13 @@ async fn handle(app: AppHandle, mut pipe: impl Relay) {
         .unwrap_or_default()
         .to_string();
 
+    // Remember opencode session ids so the sessions card can mark them live.
+    if payload.get("coucou_agent").and_then(Value::as_str) == Some("opencode") {
+        if let Some(sid) = payload.get("session_id").and_then(Value::as_str) {
+            crate::opencode::note_session(sid);
+        }
+    }
+
     if event != "PermissionRequest" {
         log::line(format!("hook {event}"));
         let _ = app.emit_to(WINDOW_LABEL, "hook", payload);

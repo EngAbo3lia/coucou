@@ -70,39 +70,73 @@ enum AgentSource: Equatable {
 // MARK: - Chat provider
 
 enum ChatProvider: String, CaseIterable, Codable {
-    case anthropic = "anthropic"
-    case google    = "google"
-    case openai    = "openai"
+    case anthropic  = "anthropic"
+    case google     = "google"
+    case openai     = "openai"
+    case openRouter = "openrouter"
+    case deepSeek   = "deepseek"
+    case custom     = "custom"
+
+    /// Every provider except Anthropic speaks the OpenAI-compatible dialect.
+    var isOpenAICompatible: Bool { self != .anthropic }
+
+    /// `custom` needs an endpoint URL from Settings before it can be used.
+    var needsBaseURL: Bool { self == .custom }
+
+    /// An OpenAI-compatible base URL, without the trailing `/chat/completions`.
+    /// `custom` returns nil: the URL lives in AppState.customBaseURL.
+    var baseURL: String? {
+        switch self {
+        case .anthropic:  nil   // uses the Messages API, not this
+        case .google:     "https://generativelanguage.googleapis.com/v1beta/openai"
+        case .openai:     "https://api.openai.com/v1"
+        case .openRouter: "https://openrouter.ai/api/v1"
+        case .deepSeek:   "https://api.deepseek.com/v1"
+        case .custom:     nil
+        }
+    }
 
     var displayName: String {
         switch self {
-        case .anthropic: "Anthropic"
-        case .google:    "Google"
-        case .openai:    "OpenAI"
+        case .anthropic:  "Anthropic"
+        case .google:     "Google"
+        case .openai:     "OpenAI"
+        case .openRouter: "OpenRouter"
+        case .deepSeek:   "DeepSeek"
+        case .custom:     "Custom"
         }
     }
 
     var accentHex: String {
         switch self {
-        case .anthropic: "#E07950"
-        case .google:    "#4285F4"
-        case .openai:    "#10A37F"
+        case .anthropic:  "#E07950"
+        case .google:     "#4285F4"
+        case .openai:     "#10A37F"
+        case .openRouter: "#6467F2"
+        case .deepSeek:   "#4D6BFE"
+        case .custom:     "#22C55E"
         }
     }
 
     var defaultModel: String {
         switch self {
-        case .anthropic: "claude-sonnet-4-6"
-        case .google:    "gemini-2.0-flash"
-        case .openai:    "gpt-4o"
+        case .anthropic:  "claude-sonnet-4-6"
+        case .google:     "gemini-2.0-flash"
+        case .openai:     "gpt-4o"
+        case .openRouter: "deepseek/deepseek-chat"
+        case .deepSeek:   "deepseek-chat"
+        case .custom:     ""
         }
     }
 
     var keychainKey: String {
         switch self {
-        case .anthropic: "anthropic-api-key"
-        case .google:    "google-api-key"
-        case .openai:    "openai-api-key"
+        case .anthropic:  "anthropic-api-key"
+        case .google:     "google-api-key"
+        case .openai:     "openai-api-key"
+        case .openRouter: "openrouter-api-key"
+        case .deepSeek:   "deepseek-api-key"
+        case .custom:     "custom-api-key"
         }
     }
 }

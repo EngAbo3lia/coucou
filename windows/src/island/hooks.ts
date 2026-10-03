@@ -25,6 +25,8 @@ interface HookPayload {
   tool_input?: Record<string, unknown>;
   /** Optional agent tag: lowercase, digits and hyphens, ≤ 24 chars. */
   coucou_agent?: string;
+  /** opencode sends the session title alongside its id. */
+  title?: string;
 }
 
 /** Same rule as HookServer.validateAgent on macOS. "claude" is reserved. */
@@ -42,6 +44,12 @@ function agentColor(name: string): string {
     h = (Math.imul(31, h) + name.charCodeAt(i)) | 0;
   }
   return FALLBACK_COLORS[Math.abs(h) % FALLBACK_COLORS.length];
+}
+
+/** A pill declared by loadIntegrationTasks (opencode) survives a stop; a purely
+ *  dynamic agent pill does not. */
+function isDeclaredPill(id: string): boolean {
+  return State.tasks.find((t) => t.id === id)?.isIntegration === true;
 }
 
 const PROJECT_ALIASES: Record<string, string> = {
@@ -136,6 +144,18 @@ function clearSession() {
   t.pillBadge = null;
 }
 
+/** Records which project/session a pill follows. opencode sends cwd and a
+ *  session id on every event; Claude Code only sends cwd. */
+function stampSession(id: string, projectName: string, cwd: string, sessionId: string | null) {
+  const t = State.tasks.find((x) => x.id === id);
+  if (!t) return;
+  if (cwd) {
+    t.sessionCwd = cwd;
+    if (t.source === "agent") t.projectLabel = projectName;
+  }
+  if (sessionId) t.sessionId = sessionId;
+}
+
 export function registerHookHandlers(island: Island) {
   void onEvent<HookPayload>("hook", (payload) => handleHook(island, payload));
 }
@@ -180,6 +200,7 @@ function handleHook(island: Island, payload: HookPayload) {
     } else {
       upsert(projectName, cwd);
     }
+    stampSession(agentId, projectName, cwd, payload.session_id ?? null);
   };
 
   switch (name) {
@@ -237,7 +258,7 @@ function handleHook(island: Island, payload: HookPayload) {
       if (focused) surface("finished", true);
       else State.setPillBadge(agentId, "finished");
       window.setTimeout(() => {
-        if (isExternalAgent) {
+        if (isExternalAgent && !isDeclaredPill(agentId)) {
           State.removeTask(agentId);
         } else {
           State.updateTask(agentId, "idle");
@@ -254,11 +275,11 @@ function handleHook(island: Island, payload: HookPayload) {
       break;
 
     case "SessionEnd":
-      if (isExternalAgent) {
+      if (isExternalAgent && !isDeclaredPill(agentId)) {
         State.removeTask(agentId);
       } else {
         State.updateTask(agentId, "idle");
-        clearSession();
+        if (!isExternalAgent) clearSession();
       }
       break;
 

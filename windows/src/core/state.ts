@@ -19,6 +19,12 @@ export interface AgentTask {
   miniEye?: EyeShape | null;
   pillBadge?: PillBadge | null;
   sessionCwd?: string | null;
+  /** opencode: the session this pill is currently following, for "continue". */
+  sessionId?: string | null;
+  /** opencode: last known session title, shown in the sessions card. */
+  sessionTitle?: string | null;
+  /** opencode: the project this session runs in, shown next to the pill name. */
+  projectLabel?: string | null;
 }
 
 export interface ApprovalInfo {
@@ -32,6 +38,13 @@ export interface ChatMessage {
   id: number;
   role: "user" | "assistant";
   content: string;
+}
+
+/** An opencode session the island chat is currently talking to. */
+export interface ChatTarget {
+  sessionId: string;
+  directory: string;
+  label: string;
 }
 
 export type PromptContext =
@@ -68,6 +81,13 @@ export const INTEGRATION_AGENTS: AgentTask[] = [
   task("integration_stripe", "Stripe", "#0570DE", "n8n"),
 ];
 
+/** The opencode pill. Declared while its plugin is installed, so the island
+ *  shows opencode instead of the unused Claude Code hook. */
+export const OPENCODE_AGENT: AgentTask = {
+  id: "agent_opencode", name: "opencode", color: "#8B5CF6",
+  state: "idle", stepIndex: 0, steps: [], source: "agent", isIntegration: true,
+};
+
 export const TOGGLEABLE_INTEGRATION_IDS = [
   "integration_resend", "integration_n8n", "integration_vercel", "integration_github",
   "integration_notion", "integration_calcom", "integration_stripe",
@@ -90,8 +110,12 @@ export interface Settings {
   screen: "primary" | "cursor";
   autostart: boolean;
   hooksInstalled: boolean;
-  /** Claude model used by the chat. */
+  /** Chat backend: anthropic, openrouter, deepseek or custom. */
+  provider: string;
+  /** Model id for the selected provider. Empty means "use the provider default". */
   model: string;
+  /** Base URL for the `custom` OpenAI-compatible provider. */
+  customBaseUrl: string;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -105,7 +129,9 @@ export const DEFAULT_SETTINGS: Settings = {
   screen: "primary",
   autostart: false,
   hooksInstalled: false,
+  provider: "anthropic",
   model: "claude-opus-5",
+  customBaseUrl: "",
 };
 
 type Listener = () => void;
@@ -126,6 +152,8 @@ class AppState {
 
   isPinned = false;
   paused = false;
+  /** True when Coucou's opencode plugin is installed (from Rust `boot`). */
+  opencodeInstalled = false;
 
   uploadProgress = 0;
   uploadDuration = 2.4;
@@ -136,6 +164,8 @@ class AppState {
   noteMessage: string | null = null;
   searchResult: SearchResult | null = null;
   chatHistory: ChatMessage[] = [];
+  /** When set, the island chat answers into this opencode session. */
+  chatTarget: ChatTarget | null = null;
   pendingApproval: ApprovalInfo | null = null;
 
   integrations: Record<string, IntegrationInfo> = {};
@@ -176,6 +206,16 @@ class AppState {
     this.notify();
   }
 
+  /** Points the island chat at an opencode session (null clears it). */
+  setChatTarget(target: ChatTarget | null) {
+    const changed = this.chatTarget?.sessionId !== target?.sessionId;
+    this.chatTarget = target;
+    // One log, one destination: answers from the chat provider and answers from
+    // an opencode session must not read as one conversation.
+    if (changed) this.chatHistory = [];
+    this.notify();
+  }
+
   updateTask(id: string, state: BotStateName) {
     const t = this.tasks.find((x) => x.id === id);
     if (!t) return;
@@ -199,7 +239,8 @@ class AppState {
     this.notify();
   }
 
-  /** loadIntegrationTasks() — VS Code always on, the rest opt-in (max 4). */
+  /** loadIntegrationTasks() — VS Code always on, the rest opt-in (max 4).
+   *  The opencode pill is declared alongside while its plugin is installed. */
   loadIntegrationTasks() {
     for (const proto of INTEGRATION_AGENTS) {
       const shouldLoad =
@@ -208,6 +249,13 @@ class AppState {
       if (shouldLoad && idx < 0) this.tasks.push({ ...proto, steps: [] });
       if (!shouldLoad && idx >= 0) this.tasks.splice(idx, 1);
     }
+
+    // opencode: declared while its plugin is installed, so its sessions stay
+    // discoverable without pretending to be the Claude Code hook.
+    const oidx = this.tasks.findIndex((t) => t.id === OPENCODE_AGENT.id);
+    if (this.opencodeInstalled && oidx < 0) this.tasks.push({ ...OPENCODE_AGENT, steps: [] });
+    if (!this.opencodeInstalled && oidx >= 0) this.tasks.splice(oidx, 1);
+
     // Order: integration_claude first, then agent_* pills (visible in slice(0,4)),
     // then other integrations in declaration order.
     const order = INTEGRATION_AGENTS.map((t) => t.id);

@@ -32,10 +32,10 @@ Meet **Mochi**: a soft little squircle with big eyes that pops out of your notch
 
 ## Features
 
-- 🤖 **Claude Code, Cursor, Codex, Gemini CLI, Antigravity and other agents, live** — see every session in your notch: what it reads, edits and runs, step by step. Tag a hook payload with `coucou_agent` to give any agent its own pill (see [`docs/AGENTS.md`](docs/AGENTS.md)). Finished? Mochi does a happy little jump.
+- 🤖 **Claude Code, Cursor, Codex, Gemini CLI, Antigravity, opencode and other agents, live** — see every session in your notch: what it reads, edits and runs, step by step. A ready-made [opencode plugin](integrations/opencode/coucou.js) ships with the app; tag any other hook payload with `coucou_agent` to give that agent its own pill (see [`docs/AGENTS.md`](docs/AGENTS.md)). Finished? Mochi does a happy little jump.
 - ✅ **Approve from the notch** — Claude Code and Codex permission requests show up with **Allow / Deny** (and **Always** for Claude Code), in VS Code, Cursor's terminal, or Codex. One click, back to work.
 - 🧑‍💻 **Jump to the right terminal** — open the exact terminal window of a session *(macOS)*.
-- 💬 **Chat with Claude, or with Gemini and OpenAI models using your own keys** *(Gemini and OpenAI: macOS)* — click the model name above the chat box to switch provider and pick a model; the list comes from each API account.
+- 💬 **Chat with any model using your own keys** — Anthropic, Google, OpenAI, **OpenRouter** (DeepSeek, Llama, Qwen, Mistral, Claude, GPT…), **DeepSeek**, or a **custom OpenAI-compatible endpoint** (Ollama, LM Studio, vLLM). Click the model name above the chat box to switch provider and pick a model; the list comes from each account. On macOS everything is in Settings; on Windows pick the provider in Settings → AI chat.
 - 📋 **Declare the tools you use** — open Settings → Active pills and pick your main workspace tool (VS Code, Cursor, Codex or Antigravity), then toggle up to 4 more: Gemini CLI, Anthropic, Google AI, OpenAI and service integrations *(macOS)*.
 - 📎 **Drop a file on the notch** — Mochi turns into a box and swallows it, then ask a question about it or send it by email *(email: macOS, Mail.app)*.
 - 🪟 **Drag Mochi onto any window** — attach that window as context for Claude *(macOS)*.
@@ -133,9 +133,11 @@ Click the Coucou icon in the menu bar (macOS) or in the system tray (Windows, Li
 | **Claude Code hooks** | live sessions and approvals | **Install hooks** — Coucou backs up `~/.claude/settings.json`, merges its hooks and shows you the diff before writing anything |
 | **Gemini CLI hooks** *(macOS)* | Gemini CLI sessions in the island | **Install hooks** in Settings → Gemini CLI — backs up `~/.gemini/settings.json` |
 | **Antigravity (agy) hooks** *(macOS)* | agy sessions in the island | **Install hooks** in Settings → Antigravity — backs up `~/.gemini/config/hooks.json` |
-| **Anthropic API key** | chat and questions about files | Settings → Anthropic API · Keychain / Windows Credential Manager / Secret Service |
+| **Anthropic API key** | chat and questions about files | Settings → Anthropic API / AI chat · Keychain / Windows Credential Manager / Secret Service |
 | **Google AI API key** *(macOS)* | chat with Google AI (Gemini) | Settings → Chat — other providers · Keychain |
 | **OpenAI API key** *(macOS)* | chat with OpenAI | Settings → Chat — other providers · Keychain |
+| **OpenRouter / DeepSeek / custom endpoint** | chat with any open-source or hosted model | Settings → AI chat (Windows) / Chat — other providers (macOS) · Keychain / Credential Manager / Secret Service |
+| **opencode plugin** | opencode sessions in the island | Settings → **opencode** → **Install hooks** (writes `~/.config/opencode/plugins/coucou.js`) |
 | **Active pills** *(macOS)* | choose which tools and agents appear in the island | Settings → Active pills |
 | Stripe, n8n, GitHub, Vercel, Resend, Notion, Cal.com | the service pills | Keychain / Windows Credential Manager / Secret Service, all optional |
 

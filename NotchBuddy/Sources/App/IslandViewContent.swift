@@ -937,7 +937,29 @@ struct ModelPickerView: View {
 
     @ViewBuilder
     private var modelListView: some View {
-        if state.loadingProviderModels.contains(state.chatProvider) {
+        if state.chatProvider == .custom {
+            // A local server may not implement `/models`, so the id is free text.
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Model id").font(.system(size: 11)).foregroundColor(Color(hex: "#8A8F98"))
+                TextField("e.g. llama3.1", text: $state.customChatModel)
+                    .textFieldStyle(.roundedBorder)
+                if state.loadingProviderModels.contains(state.chatProvider) {
+                    Text("Loading models…").font(.system(size: 11)).foregroundColor(Color(hex: "#8A8F98"))
+                } else if let error = state.providerModelFetchError[state.chatProvider] {
+                    Text(error).font(.system(size: 11)).foregroundColor(Color(hex: "#8A8F98"))
+                } else if let models = state.fetchedProviderModels[state.chatProvider], !models.isEmpty {
+                    Text("\(models.count) models found — pick below or type an id.")
+                        .font(.system(size: 11)).foregroundColor(Color(hex: "#8A8F98"))
+                    ForEach(models.prefix(12), id: \.id) { model in
+                        Button(model.label) { state.customChatModel = model.id; isPresented = false }
+                            .font(.system(size: 12))
+                            .buttonStyle(.plain)
+                            .foregroundColor(Color(hex: "#C8CDD4"))
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+        } else if state.loadingProviderModels.contains(state.chatProvider) {
             HStack(spacing: 8) {
                 ProgressView().scaleEffect(0.7)
                 Text("Loading models…")
@@ -957,9 +979,12 @@ struct ModelPickerView: View {
                     ForEach(models, id: \.id) { model in
                         Button {
                             switch state.chatProvider {
-                            case .anthropic: state.claudeModel = model.id
-                            case .google:    state.googleChatModel = model.id
-                            case .openai:    state.openAIChatModel = model.id
+                            case .anthropic:  state.claudeModel = model.id
+                            case .google:     state.googleChatModel = model.id
+                            case .openai:     state.openAIChatModel = model.id
+                            case .openRouter: state.openRouterChatModel = model.id
+                            case .deepSeek:   state.deepSeekChatModel = model.id
+                            case .custom:     state.customChatModel = model.id
                             }
                             isPresented = false
                             SoundEngine.shared.play("blip")
@@ -1183,6 +1208,10 @@ struct IntegrationCardView: View {
         case "ai_anthropic":  return KeychainStore.shared.get("anthropic-api-key") != nil
         case "ai_google":     return KeychainStore.shared.get("google-api-key")    != nil
         case "ai_openai":     return KeychainStore.shared.get("openai-api-key")    != nil
+        case "ai_openrouter": return KeychainStore.shared.get("openrouter-api-key") != nil
+        case "ai_deepseek":   return KeychainStore.shared.get("deepseek-api-key")   != nil
+        // A custom endpoint may run without a key, so having an URL is the signal.
+        case "ai_custom":     return !appState.customBaseURL.trimmingCharacters(in: .whitespaces).isEmpty
         case "integration_resend":  return KeychainStore.shared.get("resend-api-key") != nil
         case "integration_n8n":     return KeychainStore.shared.get("n8n-api-key")    != nil
         case "integration_vercel":  return KeychainStore.shared.get("vercel-token")   != nil
@@ -1269,13 +1298,17 @@ struct IntegrationCardView: View {
                    : nil
         if let err = svcErr { return err }
         let isHooks = task.id == "agent_gemini" || task.id == "agent_antigravity"
-        let isAI    = task.id == "ai_anthropic" || task.id == "ai_google" || task.id == "ai_openai"
+        let isAI    = task.id == "ai_anthropic" || task.id == "ai_google" || task.id == "ai_openai" ||
+                      task.id == "ai_openrouter" || task.id == "ai_deepseek" || task.id == "ai_custom"
         if isConfigured {
             if isHooks { return "Hooks installed" }
             if isAI {
-                let model = task.id == "ai_anthropic" ? appState.claudeModel
-                          : task.id == "ai_google"    ? appState.googleChatModel
-                          :                             appState.openAIChatModel
+                let model = task.id == "ai_anthropic"  ? appState.claudeModel
+                          : task.id == "ai_google"     ? appState.googleChatModel
+                          : task.id == "ai_openai"     ? appState.openAIChatModel
+                          : task.id == "ai_openrouter" ? appState.openRouterChatModel
+                          : task.id == "ai_deepseek"   ? appState.deepSeekChatModel
+                          :                              appState.customChatModel
                 return "Key configured · \(model)"
             }
             return "Connected · loading…"
@@ -1412,10 +1445,14 @@ struct IntegrationCardView: View {
                             .buttonStyle(.plain)
                         }
                         #endif
-                    } else if task.id == "ai_anthropic" || task.id == "ai_google" || task.id == "ai_openai" {
+                    } else if task.id == "ai_anthropic" || task.id == "ai_google" || task.id == "ai_openai" ||
+                              task.id == "ai_openrouter" || task.id == "ai_deepseek" || task.id == "ai_custom" {
                         if isConfigured {
-                            let provider: ChatProvider = task.id == "ai_anthropic" ? .anthropic
-                                                       : task.id == "ai_google"    ? .google : .openai
+                            let provider: ChatProvider = task.id == "ai_anthropic"  ? .anthropic
+                                                       : task.id == "ai_google"     ? .google
+                                                       : task.id == "ai_openai"     ? .openai
+                                                       : task.id == "ai_openrouter" ? .openRouter
+                                                       : task.id == "ai_deepseek"   ? .deepSeek : .custom
                             Button("Chat with \(task.name)") {
                                 switchChatProvider(provider)
                             }

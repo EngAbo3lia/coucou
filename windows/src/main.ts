@@ -19,6 +19,7 @@ async function main() {
   const boot = await Bridge.boot();
   if (boot) {
     State.settings = { ...State.settings, ...boot.settings };
+    State.opencodeInstalled = boot.opencodeInstalled;
   }
   island.applySettings();
   State.loadIntegrationTasks();
@@ -57,6 +58,13 @@ async function main() {
   await onEvent<Settings>("settings-changed", (s) => {
     State.settings = { ...State.settings, ...s };
     island.applySettings();
+    State.loadIntegrationTasks();
+    void refreshConfigured();
+  });
+
+  // Installing/removing the opencode plugin in Settings swaps the island pill.
+  await onEvent<boolean>("opencode-changed", (installed) => {
+    State.opencodeInstalled = installed;
     State.loadIntegrationTasks();
     void refreshConfigured();
   });

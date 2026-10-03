@@ -3,7 +3,7 @@
 // integrations land here too in a later stage.
 
 import "./settings.css";
-import { Bridge, onEvent, type HookStatus } from "../core/bridge";
+import { Bridge, onEvent, type HookStatus, type ModelInfo, type OpenCodeStatus, type ProviderInfo } from "../core/bridge";
 import { DEFAULT_SETTINGS, type Settings } from "../core/state";
 import { h, clear } from "../views/dom";
 
@@ -171,87 +171,304 @@ function claudeSection(status: HookStatus): HTMLElement {
   return section;
 }
 
-// ── Claude API section ────────────────────────────────────────────────────────
+// ── opencode ──────────────────────────────────────────────────────────────────
+//
+// opencode uses plugins, not hooks. Coucou ships one plugin file that opencode
+// loads from its own config folder, so "installing" means writing that file. Its
+// rows live in the Integrations list below: every service the app talks to sits
+// in one place, and opencode's pill follows the plugin rather than a pill switch.
 
-const MODELS: [string, string][] = [
-  ["claude-opus-5", "Claude Opus 5"],
-  ["claude-sonnet-5", "Claude Sonnet 5"],
-  ["claude-haiku-4-5", "Claude Haiku 4.5"],
-];
+/** Rows for the opencode entry: status, plugin path, install/uninstall. */
+function opencodePluginRows(status: OpenCodeStatus, reload: () => void): Node[] {
+  const rows: Node[] = [
+    h("div", {
+      class: "hint",
+      text: status.installed
+        ? "Plugin installed. Restart opencode once — its sessions then show up in the island and get their own pill."
+        : "Install the plugin and opencode sessions get their own pill, the same way Claude Code does. opencode loads it from its config folder.",
+    }),
+    h("div", { class: "row" },
+      h("label", { text: "Plugin" }),
+      h("span", { class: "path", text: status.pluginPath || "—" }),
+    ),
+  ];
 
-function apiSection(hasKey: boolean): HTMLElement {
-  const dot = statusDot(hasKey);
-  const state = h("span", { class: "hint", text: hasKey ? "Key saved in the Windows Credential Manager." : "No key yet — the chat needs one." });
-
-  const field = h("input", {
-    type: "password",
-    placeholder: hasKey ? "••••••••••••  (stored)" : "sk-ant-...",
-    style: "flex:1 1 auto;min-width:0",
-    autocomplete: "off",
-    spellcheck: "false",
-  }) as HTMLInputElement;
-
-  const saveBtn = h("button", { class: "primary", text: "Save key" });
-  const clearBtn = h("button", { class: "danger", text: "Remove" });
-  const feedback = h("div", {});
-
-  async function refresh() {
-    const present = (await Bridge.secretPresent("anthropic-api-key")) ?? false;
-    dot.style.background = present ? "#22c55e" : "#f4505e";
-    state.textContent = present
-      ? "Key saved in the Windows Credential Manager."
-      : "No key yet — the chat needs one.";
-    field.placeholder = present ? "••••••••••••  (stored)" : "sk-ant-...";
-    clearBtn.style.display = present ? "" : "none";
+  if (status.installed && !status.upToDate) {
+    rows.push(h("div", {
+      class: "notice warn",
+      text: "A different coucou.js is installed. Reinstall to update it to this build's version.",
+    }));
   }
 
-  saveBtn.addEventListener("click", async () => {
-    const value = field.value.trim();
-    if (!value) return;
-    clear(feedback);
+  const actions = h("div", { class: "row" });
+  const install = h("button", {
+    class: "primary",
+    text: status.installed ? "Reinstall plugin" : "Install plugin",
+  });
+  install.addEventListener("click", async () => {
+    install.disabled = true;
     try {
-      await Bridge.secretSet("anthropic-api-key", value);
-      field.value = "";
-      feedback.append(h("div", { class: "notice ok", text: "Saved. It never touches disk." }));
-      await refresh();
+      const backup = await Bridge.openCodeInstall();
+      rows.push(h("div", {
+        class: "notice ok",
+        text: backup
+          ? `Installed. Previous file saved as ${backup}. Restart opencode to pick it up.`
+          : "Installed. Restart opencode to pick it up.",
+      }));
+      window.setTimeout(reload, 2600);
     } catch (err) {
-      feedback.append(h("div", { class: "notice err", text: `Could not save: ${String(err)}` }));
+      install.disabled = false;
+      rows.push(h("div", { class: "notice err", text: `Could not install: ${String(err)}` }));
     }
   });
+  actions.append(install);
 
-  clearBtn.addEventListener("click", async () => {
-    clear(feedback);
-    try {
-      await Bridge.secretClear("anthropic-api-key");
-      feedback.append(h("div", { class: "notice ok", text: "Key removed." }));
-      await refresh();
-    } catch (err) {
-      feedback.append(h("div", { class: "notice err", text: `Could not remove: ${String(err)}` }));
-    }
-  });
-
-  const model = h("select", {}) as HTMLSelectElement;
-  for (const [id, label] of MODELS) model.append(h("option", { value: id, text: label }));
-  if (!MODELS.some(([id]) => id === settings.model)) {
-    model.append(h("option", { value: settings.model, text: settings.model }));
+  if (status.installed) {
+    const remove = h("button", { class: "danger", text: "Uninstall plugin" });
+    remove.addEventListener("click", async () => {
+      remove.disabled = true;
+      try {
+        await Bridge.openCodeUninstall();
+        rows.push(h("div", { class: "notice ok", text: "Plugin removed. Restart opencode." }));
+        window.setTimeout(reload, 2600);
+      } catch (err) {
+        remove.disabled = false;
+        rows.push(h("div", { class: "notice err", text: `Could not remove: ${String(err)}` }));
+      }
+    });
+    actions.append(remove);
   }
-  model.value = settings.model;
-  model.addEventListener("change", () => {
-    settings.model = model.value;
-    void save();
-  });
+  rows.push(actions);
+  return rows;
+}
 
-  clearBtn.style.display = hasKey ? "" : "none";
+// ── AI chat section ───────────────────────────────────────────────────────────
+//
+// The provider list comes from Rust (providers.rs) so it has a single source of
+// truth. Anthropic keeps its Messages API; OpenRouter, DeepSeek and a custom
+// endpoint all speak the OpenAI-compatible dialect. Keys are stored per provider
+// in the Credential Manager; only "is it present" is ever read back.
 
-  return h(
-    "section",
-    {},
-    h("h2", {}, dot, h("span", { text: "Claude" })),
-    state,
-    h("div", { class: "row" }, h("label", { text: "API key" }), field, saveBtn, clearBtn),
-    h("div", { class: "row" }, h("label", { text: "Model" }), model),
-    feedback,
-  );
+/** Shown before the live list lands, and if it cannot be fetched. */
+const FALLBACK_MODELS: Record<string, [string, string][]> = {
+  anthropic: [
+    ["claude-opus-5", "Claude Opus 5"],
+    ["claude-sonnet-5", "Claude Sonnet 5"],
+    ["claude-haiku-4-5", "Claude Haiku 4.5"],
+  ],
+  openrouter: [
+    ["deepseek/deepseek-chat", "DeepSeek Chat"],
+    ["deepseek/deepseek-r1", "DeepSeek R1"],
+    ["meta-llama/llama-3.3-70b-instruct", "Llama 3.3 70B"],
+    ["qwen/qwen-2.5-72b-instruct", "Qwen 2.5 72B"],
+    ["mistralai/mistral-large", "Mistral Large"],
+  ],
+  deepseek: [
+    ["deepseek-chat", "DeepSeek Chat"],
+    ["deepseek-reasoner", "DeepSeek Reasoner"],
+  ],
+  custom: [],
+};
+
+function chatSection(providers: ProviderInfo[], present: Record<string, boolean>): HTMLElement {
+  const body = h("div", { style: "display:flex;flex-direction:column;gap:12px" });
+  const section = h("section", {}, h("h2", {}, h("span", { text: "AI chat" })), body);
+
+  // Fetched once per provider; cleared when the endpoint URL changes.
+  const modelCache: Record<string, ModelInfo[]> = {};
+  const modelErrors: Record<string, string> = {};
+  const loading = new Set<string>();
+
+  const currentProvider = (): ProviderInfo =>
+    providers.find((p) => p.id === settings.provider) ?? providers[0];
+
+  async function loadModels(id: string, force = false) {
+    if (loading.has(id) || (modelCache[id] && !force)) return;
+    loading.add(id);
+    delete modelErrors[id];
+    draw();
+    try {
+      const list = await Bridge.providerModels(id);
+      if (list && list.length) modelCache[id] = list;
+      else modelErrors[id] = "No models returned — check the key and endpoint.";
+    } catch (err) {
+      modelErrors[id] = String(err).replace(/^Error:\s*/, "");
+    } finally {
+      loading.delete(id);
+      draw();
+    }
+  }
+
+  function modelChoices(provider: ProviderInfo): [string, string][] {
+    const fetched = modelCache[provider.id];
+    if (fetched) return fetched.map((m) => [m.id, m.label]);
+    return FALLBACK_MODELS[provider.id] ?? [];
+  }
+
+  function keyField(provider: ProviderInfo): HTMLElement {
+    const stored = present[provider.key] ?? false;
+    const dot = statusDot(stored);
+    const hint = h("span", {
+      class: "hint",
+      text: stored ? "Stored in the Windows Credential Manager." : "No key yet.",
+    });
+    const placeholder = provider.keyRequired || provider.id === "custom"
+      ? (provider.id === "custom" ? "optional for local servers" : "paste your key")
+      : "optional";
+    const input = h("input", {
+      type: "password",
+      placeholder: stored ? "••••••••••••  (stored)" : placeholder,
+      style: "flex:1 1 auto;min-width:0",
+      autocomplete: "off",
+      spellcheck: "false",
+    }) as HTMLInputElement;
+    const saveBtn = h("button", { class: "primary", text: "Save key" });
+    const clearBtn = h("button", { class: "danger", text: "Remove" });
+    clearBtn.style.display = stored ? "" : "none";
+
+    async function refresh() {
+      const now = (await Bridge.secretPresent(provider.key)) ?? false;
+      present[provider.key] = now;
+      dot.style.background = now ? "#22c55e" : "#f4505e";
+      hint.textContent = now ? "Stored in the Windows Credential Manager." : "No key yet.";
+      input.placeholder = now ? "••••••••••••  (stored)" : placeholder;
+      clearBtn.style.display = now ? "" : "none";
+    }
+
+    saveBtn.addEventListener("click", async () => {
+      const value = input.value.trim();
+      if (!value) return;
+      try {
+        await Bridge.secretSet(provider.key, value);
+        input.value = "";
+        await refresh();
+        void loadModels(provider.id, true);
+      } catch (err) {
+        hint.textContent = `Could not save: ${String(err)}`;
+        hint.style.color = "#f4505e";
+      }
+    });
+    clearBtn.addEventListener("click", async () => {
+      try {
+        await Bridge.secretClear(provider.key);
+        await refresh();
+        delete modelCache[provider.id];
+        void loadModels(provider.id, true);
+      } catch (err) {
+        hint.textContent = `Could not remove: ${String(err)}`;
+        hint.style.color = "#f4505e";
+      }
+    });
+
+    return h("div", {},
+      h("div", { class: "row" },
+        h("label", { text: provider.id === "custom" ? "API key (optional)" : "API key" }),
+        input, saveBtn, clearBtn, dot,
+      ),
+      hint,
+    );
+  }
+
+  function modelRow(provider: ProviderInfo): HTMLElement {
+    const choices = modelChoices(provider);
+    const status = h("span", { class: "hint" });
+    if (loading.has(provider.id)) {
+      status.textContent = "Loading models…";
+    } else if (modelErrors[provider.id]) {
+      status.textContent = modelErrors[provider.id];
+      status.style.color = "#f5a524";
+    } else if (modelCache[provider.id]) {
+      status.textContent = `${modelCache[provider.id].length} models`;
+    } else {
+      status.textContent = "Showing suggested models.";
+    }
+
+    const refresh = h("button", { text: "Refresh" });
+    refresh.addEventListener("click", () => void loadModels(provider.id, true));
+
+    let control: HTMLElement;
+    if (provider.id === "custom") {
+      // Free text: a local server's /models may be empty or unsupported.
+      const listId = "custom-model-choices";
+      const datalist = h("datalist", { id: listId });
+      for (const [id, label] of choices) datalist.append(h("option", { value: id, text: label }));
+      const input = h("input", {
+        type: "text",
+        list: listId,
+        value: settings.model,
+        placeholder: "model id, e.g. llama3.1",
+        style: "flex:1 1 auto;min-width:0",
+        autocomplete: "off",
+        spellcheck: "false",
+      }) as HTMLInputElement;
+      input.addEventListener("change", () => { settings.model = input.value.trim(); void save(); });
+      control = h("span", { style: "display:flex;gap:6px;flex:1 1 auto;min-width:0" }, input, datalist);
+    } else {
+      const select = h("select", {}) as HTMLSelectElement;
+      for (const [id, label] of choices) select.append(h("option", { value: id, text: label }));
+      if (settings.model && !choices.some(([id]) => id === settings.model)) {
+        select.append(h("option", { value: settings.model, text: settings.model }));
+      }
+      if (!settings.model && provider.defaultModel) {
+        select.append(h("option", { value: provider.defaultModel, text: provider.defaultModel }));
+        settings.model = provider.defaultModel;
+      }
+      select.value = settings.model;
+      select.addEventListener("change", () => { settings.model = select.value; void save(); });
+      control = select;
+    }
+
+    return h("div", {},
+      h("div", { class: "row" }, h("label", { text: "Model" }), control, refresh),
+      status,
+    );
+  }
+
+  function draw() {
+    const provider = currentProvider();
+    clear(body);
+
+    const select = h("select", {}) as HTMLSelectElement;
+    for (const p of providers) select.append(h("option", { value: p.id, text: p.name }));
+    select.value = provider.id;
+    select.addEventListener("change", () => {
+      settings.provider = select.value;
+      settings.model = currentProvider().defaultModel;
+      void save();
+      draw();
+      void loadModels(settings.provider);
+    });
+    body.append(h("div", { class: "row" }, h("label", { text: "Provider" }), select));
+
+    if (provider.id === "custom") {
+      const url = h("input", {
+        type: "text",
+        value: settings.customBaseUrl,
+        placeholder: "http://localhost:11434/v1",
+        style: "flex:1 1 auto;min-width:0",
+        autocomplete: "off",
+        spellcheck: "false",
+      }) as HTMLInputElement;
+      url.addEventListener("change", () => {
+        settings.customBaseUrl = url.value.trim();
+        delete modelCache[provider.id];
+        void save();
+        void loadModels(provider.id, true);
+      });
+      body.append(h("div", { class: "row" }, h("label", { text: "Endpoint" }), url));
+    }
+
+    body.append(keyField(provider), modelRow(provider));
+
+    // Kick off a fetch the first time this provider is shown.
+    if (!modelCache[provider.id] && !loading.has(provider.id) && !modelErrors[provider.id]) {
+      const hasKey = present[provider.key] ?? false;
+      if (hasKey || !provider.keyRequired) void loadModels(provider.id);
+    }
+  }
+
+  draw();
+  return section;
 }
 
 // ── Integrations section ──────────────────────────────────────────────────────
@@ -286,7 +503,10 @@ const INTEGRATIONS: IntegrationDef[] = [
 
 const MAX_ACTIVE = 4;
 
-function integrationsSection(present: Record<string, boolean>): HTMLElement {
+function integrationsSection(
+  present: Record<string, boolean>,
+  opencode: OpenCodeStatus,
+): HTMLElement {
   const note = h("div", { class: "hint" });
   const list = h("div", { style: "display:flex;flex-direction:column;gap:14px" });
 
@@ -294,6 +514,41 @@ function integrationsSection(present: Record<string, boolean>): HTMLElement {
     const used = settings.activeIntegrations.length;
     note.textContent = `Pick up to ${MAX_ACTIVE} pills to show next to Mochi — ${used}/${MAX_ACTIVE} in use. Keys are stored in the Windows Credential Manager, never on disk.`;
   }
+
+  // opencode leads the list: it is an agent, not a service, so it has a plugin
+  // to install instead of a key, and no pill switch — the plugin is the switch.
+  const agentHost = h("div", { style: "display:flex;flex-direction:column;gap:6px" });
+  list.append(agentHost);
+
+  async function reloadAgent() {
+    const fresh = (await Bridge.openCodeStatus()) ?? opencode;
+    drawAgent(fresh);
+  }
+
+  function drawAgent(status: OpenCodeStatus) {
+    Object.assign(opencode, status);
+    clear(agentHost);
+    const name = h(
+      "div",
+      { style: "display:flex;align-items:center;gap:8px;min-width:132px;padding-top:4px" },
+      statusDot(opencode.installed),
+      h("i", { class: "dot", style: "background:#8B5CF6" }),
+      h("span", { style: "font-size:12.5px", text: "opencode" }),
+    );
+    agentHost.append(
+      h(
+        "div",
+        { style: "display:flex;gap:12px;align-items:flex-start" },
+        name,
+        h(
+          "div",
+          { style: "display:flex;flex-direction:column;gap:6px;flex:1 1 auto;min-width:0" },
+          ...opencodePluginRows(opencode, () => void reloadAgent()),
+        ),
+      ),
+    );
+  }
+  drawAgent(opencode);
 
   for (const def of INTEGRATIONS) {
     const active = settings.activeIntegrations.includes(def.id);
@@ -429,21 +684,29 @@ async function main() {
     installed: false, settingsPath: "", hookPath: "", hookReady: false,
   };
 
-  const hasKey = (await Bridge.secretPresent("anthropic-api-key")) ?? false;
+  const providers: ProviderInfo[] = (await Bridge.chatProviders()) ?? [
+    { id: "anthropic", name: "Anthropic", accent: "#E07950", defaultModel: "claude-opus-5",
+      key: "anthropic-api-key", keyRequired: true, style: "anthropic" },
+  ];
 
   const keys = [
+    "anthropic-api-key", "openrouter-api-key", "deepseek-api-key", "custom-api-key",
     "stripe-api-key", "github-token", "vercel-token",
     "n8n-url", "n8n-api-key", "resend-api-key", "notion-api-key", "calcom-api-key",
   ];
   const present: Record<string, boolean> = {};
   for (const k of keys) present[k] = (await Bridge.secretPresent(k)) ?? false;
 
+  const opencode = (await Bridge.openCodeStatus()) ?? {
+    installed: false, upToDate: false, pluginPath: "", configDir: "",
+  };
+
   clear(root);
   root.append(
     h("h1", {}, h("span", { text: "Coucou" }), h("span", { class: "version", text: version })),
     claudeSection(status),
-    apiSection(hasKey),
-    integrationsSection(present),
+    chatSection(providers, present),
+    integrationsSection(present, opencode),
     generalSection(),
     h("div", {
       class: "hint",

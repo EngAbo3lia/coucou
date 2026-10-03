@@ -7,7 +7,7 @@
 import { h, svg, clear, dot } from "./dom";
 import { ICONS } from "./icons";
 import { State, type AgentTask } from "../core/state";
-import { Bridge } from "../core/bridge";
+import { Bridge, type OpencodeSession } from "../core/bridge";
 
 /** Same shape as the Swift `timeAgo` computed properties. */
 export function timeAgo(value: unknown): string {
@@ -57,10 +57,13 @@ function idleCard(task: AgentTask, openSettings: () => void): HTMLElement {
   const info = State.integrations[task.id];
   const configured = info?.configured ?? false;
   const error = info?.error ?? null;
-  // The Claude Code pill is about hooks, not a key — the macOS wording would be
-  // misleading here.
-  const missing = task.id === "integration_claude" ? "Hooks not installed" : "Key not configured";
-  const label = error ?? (configured ? "Connected · loading…" : missing);
+  // The Claude Code pill is about hooks, the opencode pill about its plugin —
+  // the macOS wording would be misleading here.
+  const missing = task.id === "integration_claude" ? "Hooks not installed"
+    : task.id === "agent_opencode" ? "Plugin not installed"
+    : "Key not configured";
+  const ready = task.id === "agent_opencode" ? "Watching for sessions" : "Connected · loading…";
+  const label = error ?? (configured ? ready : missing);
   const statusColor = error || !configured ? "#F4505E" : "#22C55E";
 
   const actions = h("div", { class: "int-actions" });
@@ -92,7 +95,12 @@ function idleCard(task: AgentTask, openSettings: () => void): HTMLElement {
       }),
     );
   }
-  if (configured) {
+  if (task.id === "agent_opencode") {
+    // No poller to refresh — the useful action is managing the plugin.
+    actions.append(
+      h("button", { class: "link-btn", style: "color:#8e939c", text: "Settings…", onclick: openSettings }),
+    );
+  } else if (configured) {
     actions.append(
       h("button", {
         class: "link-btn",
@@ -107,11 +115,150 @@ function idleCard(task: AgentTask, openSettings: () => void): HTMLElement {
     );
   }
 
+  const subtitle = task.id === "agent_opencode" ? "Agent" : "Integration";
   return h(
     "div",
     { class: "int-card" },
-    header(task.color, task.id === "integration_claude" ? "VS Code" : task.name, "Integration"),
+    header(task.color, task.id === "integration_claude" ? "VS Code" : task.name, subtitle),
     h("div", { class: "int-status" }, dot(statusColor, 5), h("span", { text: label })),
+    actions,
+  );
+}
+
+// ── opencode sessions ─────────────────────────────────────────────────────────
+
+/** Guards against two renders both kicking off a session fetch. */
+let opencodeFetching = false;
+/** Which row the Continue buttons act on. Null means "the newest session". */
+let selectedOpencodeSession: string | null = null;
+
+function lastComponent(p: string): string {
+  const cleaned = p.replace(/[\\/]+$/, "");
+  const i = Math.max(cleaned.lastIndexOf("\\"), cleaned.lastIndexOf("/"));
+  return i >= 0 ? cleaned.slice(i + 1) : cleaned;
+}
+
+function shortId(id: string): string {
+  return id.length > 12 ? `${id.slice(0, 8)}…` : id;
+}
+
+/** Loads recent sessions once, caching them the way a poller would. */
+function loadOpencodeSessions() {
+  if (opencodeFetching) return;
+  opencodeFetching = true;
+  void Bridge.opencodeSessions(10)
+    .then((sessions) => {
+      State.integrations.agent_opencode = {
+        data: { sessions }, error: null, loaded: true, configured: true,
+      };
+      State.notify();
+    })
+    .catch((err) => {
+      State.integrations.agent_opencode = {
+        data: {}, error: String(err), loaded: false, configured: true,
+      };
+      State.notify();
+    })
+    .finally(() => {
+      opencodeFetching = false;
+    });
+}
+
+function skeletonRow(): HTMLElement {
+  const bar = (width: string) =>
+    h("span", { style: `width:${width};height:8px;border-radius:4px;background:#ffffff1a` });
+  return h("div", { class: "int-row" }, bar("45%"), bar("18%"));
+}
+
+function sessionRow(
+  session: OpencodeSession,
+  selected: boolean,
+  onSelect: () => void,
+): HTMLElement {
+  const label = session.title?.trim() || shortId(session.id);
+  const row = listRow("#8B5CF6", selected,
+    h("span", { class: "int-name", text: label, title: label }),
+    h("span", { class: "int-sub", text: session.directory ? lastComponent(session.directory) : "" }),
+    h("span", { class: "int-ago", text: timeAgo(session.updated) }),
+  );
+  if (session.live) row.prepend(dot("#22C55E", 5));
+  row.style.cursor = "pointer";
+  row.onclick = onSelect;
+  return row;
+}
+
+/** The opencode pill's card: live + recent sessions. Pick a row, then Continue. */
+export function opencodeCard(task: AgentTask, hooks: IntegrationCardHooks): HTMLElement {
+  const info = State.integrations["agent_opencode"];
+  const sessions = (info?.data as { sessions?: OpencodeSession[] } | undefined)?.sessions ?? null;
+  const body = h("div", { class: "int-body" });
+
+  const retry = () => {
+    delete State.integrations.agent_opencode;
+    State.notify();
+  };
+
+  let selected: OpencodeSession | null = null;
+  if (info?.error) {
+    body.append(
+      h("div", { class: "int-status" }, dot("#F4505E", 5), h("span", { text: "Could not read sessions" })),
+      h("button", { class: "link-btn", style: "color:#8e939c", text: "Retry", onclick: retry }),
+    );
+  } else if (!sessions) {
+    loadOpencodeSessions();
+    body.append(skeletonRow(), skeletonRow(), skeletonRow());
+  } else if (sessions.length === 0) {
+    body.append(
+      h("div", { class: "int-status" }, dot("#8e939c", 5), h("span", { text: "No opencode session yet" })),
+    );
+  } else {
+    // A row the island no longer lists must not stay the target of Continue.
+    if (selectedOpencodeSession && !sessions.some((s) => s.id === selectedOpencodeSession)) {
+      selectedOpencodeSession = null;
+    }
+    selected = sessions.find((s) => s.id === selectedOpencodeSession) ?? sessions[0];
+    sessions.forEach((s) =>
+      body.append(
+        sessionRow(s, s.id === selected?.id, () => {
+          selectedOpencodeSession = s.id;
+          State.notify();
+        }),
+      ),
+    );
+  }
+
+  const actions = h("div", { class: "int-actions" });
+  if (selected) {
+    const target = {
+      id: selected.id,
+      directory: selected.directory,
+      title: selected.title?.trim() || lastComponent(selected.directory) || shortId(selected.id),
+    };
+    actions.append(
+      h("button", {
+        class: "link-btn",
+        style: `color:${task.color}d9`,
+        text: "Continue: Chat",
+        onclick: () => hooks.continueInChat(target),
+      }),
+      h("button", {
+        class: "link-btn",
+        style: `color:${task.color}d9`,
+        text: "Continue: Opencode",
+        onclick: () => hooks.continueInOpencode(target),
+      }),
+      h("button", { class: "link-btn", style: "color:#8e939c", text: "Refresh", onclick: retry }),
+    );
+  }
+  actions.append(
+    h("button", { class: "link-btn", style: "color:#8e939c", text: "Settings…", onclick: hooks.openSettings }),
+  );
+
+  return h(
+    "div",
+    { class: "int-card" },
+    header(task.color, task.name, "Agent"),
+    body,
     actions,
   );
 }
@@ -379,6 +526,10 @@ export interface IntegrationCardHooks {
   openDetail(): void;
   closeDetail(): void;
   openSettings(): void;
+  /** Continue a session in the island chat instead of a terminal. */
+  continueInChat(session: { id: string; directory: string; title: string }): void;
+  /** Continue a session in opencode's own window. */
+  continueInOpencode(session: { id: string; directory: string; title: string }): void;
 }
 
 /** True when this integration has data worth showing instead of the idle card. */
@@ -404,6 +555,9 @@ export function hasIntegrationData(id: string): boolean {
 }
 
 export function renderIntegrationCard(task: AgentTask, hooks: IntegrationCardHooks): HTMLElement {
+  if (task.id === "agent_opencode") {
+    return opencodeCard(task, hooks);
+  }
   if (task.id === "integration_n8n") {
     const hasActivity = task.steps.length > 0 && (task.state === "finished" || task.state === "error");
     return hooks.detailOpen && hasActivity

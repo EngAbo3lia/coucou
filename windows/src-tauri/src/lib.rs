@@ -260,6 +260,14 @@ async fn opencode_continue(session_id: String, directory: String) -> Result<bool
         .map_err(|e| e.to_string())?
 }
 
+/// Answers in a session from the island chat, no terminal involved.
+#[tauri::command]
+async fn opencode_run(session_id: String, directory: String, message: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || opencode::run(&session_id, &directory, &message))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 fn approval_decision(app: AppHandle, request_id: String, decision: String) {
     pipe::answer(&app, &request_id, &decision);
@@ -457,6 +465,7 @@ pub fn run() {
             opencode_uninstall,
             opencode_sessions,
             opencode_continue,
+            opencode_run,
             approval_decision,
             approval_ack,
             approval_decline,

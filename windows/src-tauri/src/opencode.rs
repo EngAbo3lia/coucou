@@ -15,6 +15,7 @@ use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::platform;
 
@@ -190,6 +191,76 @@ pub fn continue_session(session_id: &str, directory: &str) -> Result<bool, Strin
 
 /// New terminal for a session: a Windows Terminal tab when available, a plain
 /// console otherwise. Unlike the hook helpers this one must be *visible*.
+/// Answers in an existing session without opening a terminal:
+/// `opencode run -s <id> --format json <message>`. The NDJSON stream is read
+/// tolerantly — the reply is the last text field seen, whatever the shape — so
+/// a schema change in opencode does not break the chat.
+pub fn run(session_id: &str, directory: &str, message: &str) -> Result<String, String> {
+    if session_id.is_empty() {
+        return Err("missing session id".into());
+    }
+    if message.trim().is_empty() {
+        return Err("empty message".into());
+    }
+    let mut cmd = Command::new(opencode_exe()?);
+    cmd.args(["run", "-s", session_id, "--format", "json", message])
+        .stdin(Stdio::null())
+        .stderr(Stdio::piped());
+    if !directory.is_empty() && std::path::Path::new(directory).is_dir() {
+        cmd.current_dir(directory);
+    }
+    platform::no_console(&mut cmd);
+    let out = cmd.output().map_err(|e| e.to_string())?;
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut reply = String::new();
+    for line in stdout.lines() {
+        if let Ok(value) = serde_json::from_str::<Value>(line) {
+            if let Some(text) = find_text(&value) {
+                if !text.trim().is_empty() {
+                    reply = text;
+                }
+            }
+        }
+    }
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        let last = err
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("opencode run failed");
+        return Err(last.trim().to_string());
+    }
+    if reply.trim().is_empty() {
+        reply = stdout.trim().to_string();
+    }
+    if reply.trim().is_empty() {
+        return Err("opencode returned nothing".into());
+    }
+    Ok(reply)
+}
+
+/// First non-empty string under a `text`/`content`/`message` key, anywhere in
+/// the value tree. That covers a lone `text` field and a nested `part.text`.
+fn find_text(value: &Value) -> Option<String> {
+    match value {
+        Value::String(s) => Some(s.clone()),
+        Value::Array(items) => items.iter().find_map(find_text),
+        Value::Object(map) => {
+            for key in ["text", "content", "message"] {
+                if let Some(Value::String(s)) = map.get(key) {
+                    if !s.trim().is_empty() {
+                        return Some(s.clone());
+                    }
+                }
+            }
+            map.values().find_map(find_text)
+        }
+        _ => None,
+    }
+}
+
 fn spawn_terminal(session_id: &str, directory: &str) -> Result<(), String> {
     let exe = opencode_exe()?.to_string_lossy().to_string();
     if let Some(wt) = platform::find_on_path("wt") {

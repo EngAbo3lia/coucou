@@ -5,7 +5,7 @@
 import { h, svg, clear, dot } from "./dom";
 import { ICONS } from "./icons";
 import { Ticker } from "./ticker";
-import { State, type AgentTask } from "../core/state";
+import { State, type AgentTask, type ChatTarget } from "../core/state";
 import { washRGBA, type IslandViewName, type Wash } from "../core/layout";
 import { createMiniBot, pruneMiniBots } from "../mochi/minibots";
 import { buildPrompt } from "./chat";
@@ -19,6 +19,8 @@ export interface ViewActions {
   openTerminal(): void;
   /** The ↗ button: opens whatever the focused pill points at. */
   openTarget(): void;
+  /** Continue an opencode session: in the island chat, or in a terminal. */
+  continueSession(session: ChatTarget, mode: "chat" | "opencode"): void;
   openUrl(url: string): void;
   decide(d: "allow" | "deny"): void;
   toggleSound(): void;
@@ -173,6 +175,10 @@ function buildOverview(actions: ViewActions): ViewHost {
       State.notify();
     },
     openSettings: () => actions.openSettingsWindow(),
+    continueInChat: (s) =>
+      actions.continueSession({ sessionId: s.id, directory: s.directory, label: s.title }, "chat"),
+    continueInOpencode: (s) =>
+      actions.continueSession({ sessionId: s.id, directory: s.directory, label: s.title }, "opencode"),
   };
 
   return {
@@ -383,8 +389,25 @@ function buildError(actions: ViewActions): ViewHost {
 function buildFinished(actions: ViewActions): ViewHost {
   const who = h("div");
   const title = h("div", { class: "title" });
+  // Continuing a session has two homes: the island chat, or opencode's own
+  // terminal. Agent pills get both; everything else keeps its single button.
+  const sessionTarget = (): ChatTarget | null => {
+    const task = State.focusTask;
+    if (!task?.sessionId) return null;
+    return { sessionId: task.sessionId, directory: task.sessionCwd ?? "", label: task.name };
+  };
+  const chatBtn = btn("Continue: Chat", "primary", () => {
+    const s = sessionTarget();
+    if (s) actions.continueSession(s, "chat");
+  });
+  const codeBtn = btn("Continue: Opencode", "secondary", () => {
+    const s = sessionTarget();
+    if (s) actions.continueSession(s, "opencode");
+  });
   const openBtn = btn("Open terminal", "primary", () => actions.openTerminal());
   const row = h("div", { class: "actions" },
+    chatBtn,
+    codeBtn,
     openBtn,
     btn("OK", "secondary", () => actions.collapse()),
   );
@@ -397,6 +420,10 @@ function buildFinished(actions: ViewActions): ViewHost {
       who.append(agentWho(task, `${agentLabel(task)} finished`));
       title.textContent = task?.steps.at(-1) ?? "Session finished";
       (openBtn.firstChild as HTMLElement).textContent = openActionLabel(task);
+      const resumable = !!task?.sessionId;
+      chatBtn.style.display = resumable ? "" : "none";
+      codeBtn.style.display = resumable ? "" : "none";
+      openBtn.style.display = resumable ? "none" : "";
     },
   };
 }

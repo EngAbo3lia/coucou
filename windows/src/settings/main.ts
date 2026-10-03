@@ -171,91 +171,75 @@ function claudeSection(status: HookStatus): HTMLElement {
   return section;
 }
 
-// ── opencode section ──────────────────────────────────────────────────────────
+// ── opencode ──────────────────────────────────────────────────────────────────
 //
-// opencode uses plugins, not hooks. "Installing the hooks" copies Coucou's
-// plugin into ~/.config/opencode/plugins/ so opencode sessions get a pill.
+// opencode uses plugins, not hooks. Coucou ships one plugin file that opencode
+// loads from its own config folder, so "installing" means writing that file. Its
+// rows live in the Integrations list below: every service the app talks to sits
+// in one place, and opencode's pill follows the plugin rather than a pill switch.
 
-function opencodeSection(status: OpenCodeStatus): HTMLElement {
-  const body = h("div", { style: "display:flex;flex-direction:column;gap:12px" });
-  const section = h("section", {}, h("h2", {}, statusDot(status.installed), h("span", { text: "opencode" })), body);
+/** Rows for the opencode entry: status, plugin path, install/uninstall. */
+function opencodePluginRows(status: OpenCodeStatus, reload: () => void): Node[] {
+  const rows: Node[] = [
+    h("div", {
+      class: "hint",
+      text: status.installed
+        ? "Plugin installed. Restart opencode once — its sessions then show up in the island and get their own pill."
+        : "Install the plugin and opencode sessions get their own pill, the same way Claude Code does. opencode loads it from its config folder.",
+    }),
+    h("div", { class: "row" },
+      h("label", { text: "Plugin" }),
+      h("span", { class: "path", text: status.pluginPath || "—" }),
+    ),
+  ];
 
-  async function rebuild() {
-    const fresh = await Bridge.openCodeStatus();
-    if (fresh) Object.assign(status, fresh);
-    const head = section.querySelector("h2")!;
-    clear(head);
-    head.append(statusDot(status.installed), h("span", { text: "opencode" }));
-    draw();
+  if (status.installed && !status.upToDate) {
+    rows.push(h("div", {
+      class: "notice warn",
+      text: "A different coucou.js is installed. Reinstall to update it to this build's version.",
+    }));
   }
 
-  function draw() {
-    clear(body);
-    body.append(
-      h("div", {
-        class: "hint",
-        text: status.installed
-          ? "Coucou's plugin is installed. Restart opencode once — your sessions then show up in the island and get their own pill."
-          : "Install the plugin so your opencode sessions show up in the island, the same way Claude Code does. opencode loads it from its config folder.",
-      }),
-      h("div", { class: "row" },
-        h("label", { text: "Plugin" }),
-        h("span", { class: "path", text: status.pluginPath || "—" }),
-      ),
-    );
-
-    if (status.installed && !status.upToDate) {
-      body.append(h("div", {
-        class: "notice warn",
-        text: "A different coucou.js is installed. Reinstall to update it to this build's version.",
+  const actions = h("div", { class: "row" });
+  const install = h("button", {
+    class: "primary",
+    text: status.installed ? "Reinstall plugin" : "Install plugin",
+  });
+  install.addEventListener("click", async () => {
+    install.disabled = true;
+    try {
+      const backup = await Bridge.openCodeInstall();
+      rows.push(h("div", {
+        class: "notice ok",
+        text: backup
+          ? `Installed. Previous file saved as ${backup}. Restart opencode to pick it up.`
+          : "Installed. Restart opencode to pick it up.",
       }));
+      window.setTimeout(reload, 2600);
+    } catch (err) {
+      install.disabled = false;
+      rows.push(h("div", { class: "notice err", text: `Could not install: ${String(err)}` }));
     }
+  });
+  actions.append(install);
 
-    const actions = h("div", { class: "row" });
-    const install = h("button", {
-      class: "primary",
-      text: status.installed ? "Reinstall plugin" : "Install hooks",
-    });
-    install.addEventListener("click", async () => {
-      install.disabled = true;
+  if (status.installed) {
+    const remove = h("button", { class: "danger", text: "Uninstall plugin" });
+    remove.addEventListener("click", async () => {
+      remove.disabled = true;
       try {
-        const backup = await Bridge.openCodeInstall();
-        clear(body);
-        body.append(h("div", {
-          class: "notice ok",
-          text: backup
-            ? `Installed. Previous file saved as ${backup}. Restart opencode to pick it up.`
-            : "Installed. Restart opencode to pick it up.",
-        }));
-        window.setTimeout(() => void rebuild(), 2600);
+        await Bridge.openCodeUninstall();
+        rows.push(h("div", { class: "notice ok", text: "Plugin removed. Restart opencode." }));
+        window.setTimeout(reload, 2600);
       } catch (err) {
-        install.disabled = false;
-        body.append(h("div", { class: "notice err", text: `Could not install: ${String(err)}` }));
+        remove.disabled = false;
+        rows.push(h("div", { class: "notice err", text: `Could not remove: ${String(err)}` }));
       }
     });
-    actions.append(install);
-
-    if (status.installed) {
-      const remove = h("button", { class: "danger", text: "Uninstall plugin" });
-      remove.addEventListener("click", async () => {
-        remove.disabled = true;
-        try {
-          await Bridge.openCodeUninstall();
-          clear(body);
-          body.append(h("div", { class: "notice ok", text: "Plugin removed. Restart opencode." }));
-          window.setTimeout(() => void rebuild(), 2600);
-        } catch (err) {
-          remove.disabled = false;
-          body.append(h("div", { class: "notice err", text: `Could not remove: ${String(err)}` }));
-        }
-      });
-      actions.append(remove);
-    }
-    body.append(actions);
+    actions.append(remove);
   }
-
-  draw();
-  return section;
+  rows.push(actions);
+  return rows;
 }
 
 // ── AI chat section ───────────────────────────────────────────────────────────
@@ -519,7 +503,10 @@ const INTEGRATIONS: IntegrationDef[] = [
 
 const MAX_ACTIVE = 4;
 
-function integrationsSection(present: Record<string, boolean>): HTMLElement {
+function integrationsSection(
+  present: Record<string, boolean>,
+  opencode: OpenCodeStatus,
+): HTMLElement {
   const note = h("div", { class: "hint" });
   const list = h("div", { style: "display:flex;flex-direction:column;gap:14px" });
 
@@ -527,6 +514,41 @@ function integrationsSection(present: Record<string, boolean>): HTMLElement {
     const used = settings.activeIntegrations.length;
     note.textContent = `Pick up to ${MAX_ACTIVE} pills to show next to Mochi — ${used}/${MAX_ACTIVE} in use. Keys are stored in the Windows Credential Manager, never on disk.`;
   }
+
+  // opencode leads the list: it is an agent, not a service, so it has a plugin
+  // to install instead of a key, and no pill switch — the plugin is the switch.
+  const agentHost = h("div", { style: "display:flex;flex-direction:column;gap:6px" });
+  list.append(agentHost);
+
+  async function reloadAgent() {
+    const fresh = (await Bridge.openCodeStatus()) ?? opencode;
+    drawAgent(fresh);
+  }
+
+  function drawAgent(status: OpenCodeStatus) {
+    Object.assign(opencode, status);
+    clear(agentHost);
+    const name = h(
+      "div",
+      { style: "display:flex;align-items:center;gap:8px;min-width:132px;padding-top:4px" },
+      statusDot(opencode.installed),
+      h("i", { class: "dot", style: "background:#8B5CF6" }),
+      h("span", { style: "font-size:12.5px", text: "opencode" }),
+    );
+    agentHost.append(
+      h(
+        "div",
+        { style: "display:flex;gap:12px;align-items:flex-start" },
+        name,
+        h(
+          "div",
+          { style: "display:flex;flex-direction:column;gap:6px;flex:1 1 auto;min-width:0" },
+          ...opencodePluginRows(opencode, () => void reloadAgent()),
+        ),
+      ),
+    );
+  }
+  drawAgent(opencode);
 
   for (const def of INTEGRATIONS) {
     const active = settings.activeIntegrations.includes(def.id);
@@ -683,9 +705,8 @@ async function main() {
   root.append(
     h("h1", {}, h("span", { text: "Coucou" }), h("span", { class: "version", text: version })),
     claudeSection(status),
-    opencodeSection(opencode),
     chatSection(providers, present),
-    integrationsSection(present),
+    integrationsSection(present, opencode),
     generalSection(),
     h("div", {
       class: "hint",

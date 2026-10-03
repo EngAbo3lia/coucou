@@ -85,6 +85,9 @@ export const Bridge = {
   /** Focus a running session's window, or open it in a new terminal. */
   opencodeContinue: (sessionId: string, directory: string) =>
     callOrThrow<boolean>("opencode_continue", { sessionId, directory }),
+  /** Answers in an existing session: `opencode run -s <id> <message>`. */
+  opencodeRun: (sessionId: string, directory: string, message: string) =>
+    callOrThrow<string>("opencode_run", { sessionId, directory, message }),
 
   approvalDecision: (requestId: string, decision: "allow" | "deny") =>
     call<void>("approval_decision", { requestId, decision }),

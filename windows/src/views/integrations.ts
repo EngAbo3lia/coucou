@@ -129,6 +129,8 @@ function idleCard(task: AgentTask, openSettings: () => void): HTMLElement {
 
 /** Guards against two renders both kicking off a session fetch. */
 let opencodeFetching = false;
+/** Which row the Continue buttons act on. Null means "the newest session". */
+let selectedOpencodeSession: string | null = null;
 
 function lastComponent(p: string): string {
   const cleaned = p.replace(/[\\/]+$/, "");
@@ -168,19 +170,24 @@ function skeletonRow(): HTMLElement {
   return h("div", { class: "int-row" }, bar("45%"), bar("18%"));
 }
 
-function sessionRow(session: OpencodeSession, first: boolean): HTMLElement {
-  const row = listRow("#8B5CF6", first,
-    h("b", { text: session.title?.trim() || shortId(session.id) }),
-    h("span", { text: session.directory ? lastComponent(session.directory) : "" }),
-    h("span", { text: timeAgo(session.updated) }),
+function sessionRow(
+  session: OpencodeSession,
+  selected: boolean,
+  onSelect: () => void,
+): HTMLElement {
+  const label = session.title?.trim() || shortId(session.id);
+  const row = listRow("#8B5CF6", selected,
+    h("span", { class: "int-name", text: label, title: label }),
+    h("span", { class: "int-sub", text: session.directory ? lastComponent(session.directory) : "" }),
+    h("span", { class: "int-ago", text: timeAgo(session.updated) }),
   );
   if (session.live) row.prepend(dot("#22C55E", 5));
   row.style.cursor = "pointer";
-  row.onclick = () => void Bridge.opencodeContinue(session.id, session.directory);
+  row.onclick = onSelect;
   return row;
 }
 
-/** The opencode pill's card: live + recent sessions, click one to resume it. */
+/** The opencode pill's card: live + recent sessions. Pick a row, then Continue. */
 export function opencodeCard(task: AgentTask, hooks: IntegrationCardHooks): HTMLElement {
   const info = State.integrations["agent_opencode"];
   const sessions = (info?.data as { sessions?: OpencodeSession[] } | undefined)?.sessions ?? null;
@@ -191,6 +198,7 @@ export function opencodeCard(task: AgentTask, hooks: IntegrationCardHooks): HTML
     State.notify();
   };
 
+  let selected: OpencodeSession | null = null;
   if (info?.error) {
     body.append(
       h("div", { class: "int-status" }, dot("#F4505E", 5), h("span", { text: "Could not read sessions" })),
@@ -204,18 +212,54 @@ export function opencodeCard(task: AgentTask, hooks: IntegrationCardHooks): HTML
       h("div", { class: "int-status" }, dot("#8e939c", 5), h("span", { text: "No opencode session yet" })),
     );
   } else {
-    sessions.forEach((s, i) => body.append(sessionRow(s, i === 0)));
+    // A row the island no longer lists must not stay the target of Continue.
+    if (selectedOpencodeSession && !sessions.some((s) => s.id === selectedOpencodeSession)) {
+      selectedOpencodeSession = null;
+    }
+    selected = sessions.find((s) => s.id === selectedOpencodeSession) ?? sessions[0];
+    sessions.forEach((s) =>
+      body.append(
+        sessionRow(s, s.id === selected?.id, () => {
+          selectedOpencodeSession = s.id;
+          State.notify();
+        }),
+      ),
+    );
   }
+
+  const actions = h("div", { class: "int-actions" });
+  if (selected) {
+    const target = {
+      id: selected.id,
+      directory: selected.directory,
+      title: selected.title?.trim() || lastComponent(selected.directory) || shortId(selected.id),
+    };
+    actions.append(
+      h("button", {
+        class: "link-btn",
+        style: `color:${task.color}d9`,
+        text: "Continue: Chat",
+        onclick: () => hooks.continueInChat(target),
+      }),
+      h("button", {
+        class: "link-btn",
+        style: `color:${task.color}d9`,
+        text: "Continue: Opencode",
+        onclick: () => hooks.continueInOpencode(target),
+      }),
+      h("button", { class: "link-btn", style: "color:#8e939c", text: "Refresh", onclick: retry }),
+    );
+  }
+  actions.append(
+    h("button", { class: "link-btn", style: "color:#8e939c", text: "Settings…", onclick: hooks.openSettings }),
+  );
 
   return h(
     "div",
     { class: "int-card" },
     header(task.color, task.name, "Agent"),
     body,
-    h("div", { class: "int-actions" },
-      h("button", { class: "link-btn", style: `color:${task.color}d9`, text: "Refresh", onclick: retry }),
-      h("button", { class: "link-btn", style: "color:#8e939c", text: "Settings…", onclick: hooks.openSettings }),
-    ),
+    actions,
   );
 }
 
@@ -482,6 +526,10 @@ export interface IntegrationCardHooks {
   openDetail(): void;
   closeDetail(): void;
   openSettings(): void;
+  /** Continue a session in the island chat instead of a terminal. */
+  continueInChat(session: { id: string; directory: string; title: string }): void;
+  /** Continue a session in opencode's own window. */
+  continueInOpencode(session: { id: string; directory: string; title: string }): void;
 }
 
 /** True when this integration has data worth showing instead of the idle card. */

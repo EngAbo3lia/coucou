@@ -790,6 +790,17 @@ input[type="range"]::-webkit-slider-thumb {
   background: linear-gradient(135deg, #ff6b5b, #f7b32b, #2dd4a7, #38bdf8, #a78bfa);
 }
 
+.chip-x {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--dim-2);
+  margin-left: 1px;
+}
+
+.chip-x:hover {
+  color: var(--ink);
+}
+
 .chat-log {
   flex: 1 1 auto;
   min-height: 0;
@@ -1111,6 +1122,7 @@ input[type="range"]::-webkit-slider-thumb {
 .int-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   padding-top: 6px;
 }

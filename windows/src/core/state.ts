@@ -40,6 +40,13 @@ export interface ChatMessage {
   content: string;
 }
 
+/** An opencode session the island chat is currently talking to. */
+export interface ChatTarget {
+  sessionId: string;
+  directory: string;
+  label: string;
+}
+
 export type PromptContext =
   | { kind: "window"; appName: string; title: string; url?: string }
   | { kind: "file"; name: string; path?: string };
@@ -157,6 +164,8 @@ class AppState {
   noteMessage: string | null = null;
   searchResult: SearchResult | null = null;
   chatHistory: ChatMessage[] = [];
+  /** When set, the island chat answers into this opencode session. */
+  chatTarget: ChatTarget | null = null;
   pendingApproval: ApprovalInfo | null = null;
 
   integrations: Record<string, IntegrationInfo> = {};
@@ -194,6 +203,16 @@ class AppState {
     if (!t) return;
     this.focusId = id;
     t.pillBadge = null;
+    this.notify();
+  }
+
+  /** Points the island chat at an opencode session (null clears it). */
+  setChatTarget(target: ChatTarget | null) {
+    const changed = this.chatTarget?.sessionId !== target?.sessionId;
+    this.chatTarget = target;
+    // One log, one destination: answers from the chat provider and answers from
+    // an opencode session must not read as one conversation.
+    if (changed) this.chatHistory = [];
     this.notify();
   }
 

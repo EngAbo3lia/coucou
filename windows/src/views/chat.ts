@@ -36,6 +36,19 @@ function contextChip(label: string): HTMLElement {
   return chip;
 }
 
+/** Same chip, plus a way out: a chat aimed at a session must be easy to stop. */
+function sessionChip(label: string, onClear: () => void): HTMLElement {
+  const chip = h(
+    "div",
+    { class: "chip" },
+    h("i", { class: "chip-dot" }),
+    h("span", { text: label }),
+    h("b", { class: "chip-x", text: "×", onclick: onClear }),
+  );
+  requestAnimationFrame(() => chip.classList.add("settled"));
+  return chip;
+}
+
 export function buildPrompt(onHeightChange: () => void): ViewHost {
   const chipRow = h("div", { class: "chip-row" });
   const log = h("div", { class: "chat-log" });
@@ -75,8 +88,13 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
       State.chatHistory.length === 1 && file ? { kind: "file", name: file.name, path: file.path } : null;
 
     try {
-      const reply = await Bridge.chatSend(query, context);
-      State.chatHistory.push({ id: nextId++, role: "assistant", content: reply.text });
+      // A session target means "answer inside that opencode session", not
+      // Coucou's own chat provider. Same input box, different destination.
+      const target = State.chatTarget;
+      const reply = target
+        ? await Bridge.opencodeRun(target.sessionId, target.directory, query)
+        : (await Bridge.chatSend(query, context)).text;
+      State.chatHistory.push({ id: nextId++, role: "assistant", content: reply });
       State.stateOverride = null;
       Sound.play("finish");
     } catch (err) {
@@ -105,11 +123,15 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
     el,
     sync() {
       const file = State.droppedFile;
-      const wantChip = file?.name ?? "";
-      if (chipRow.dataset.label !== wantChip) {
+      const target = State.chatTarget;
+      const wantChip = target ? `opencode · ${target.label}` : file?.name ?? "";
+      const kind = target ? "session" : file?.name ? "file" : "";
+      if (chipRow.dataset.label !== wantChip || chipRow.dataset.kind !== kind) {
         chipRow.dataset.label = wantChip;
+        chipRow.dataset.kind = kind;
         clear(chipRow);
-        if (wantChip) chipRow.append(contextChip(wantChip));
+        if (target) chipRow.append(sessionChip(wantChip, () => State.setChatTarget(null)));
+        else if (wantChip) chipRow.append(contextChip(wantChip));
       }
 
       const thinking = State.stateOverride === "thinking";
@@ -122,7 +144,11 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
         log.scrollTop = log.scrollHeight;
       }
 
-      input.placeholder = State.chatHistory.length === 0 ? "Ask me anything…" : "Continue…";
+      input.placeholder = target
+        ? "Message this opencode session…"
+        : State.chatHistory.length === 0
+          ? "Ask me anything…"
+          : "Continue…";
       input.disabled = sending;
     },
     focus() {

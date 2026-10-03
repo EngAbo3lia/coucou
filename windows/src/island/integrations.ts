@@ -37,7 +37,14 @@ export async function refreshConfigured() {
     data: {}, error: null, loaded: false, configured: false,
   };
   State.integrations.integration_claude = { ...claude, configured: hooks };
-  State.notify();
+
+  const opencode = State.integrations.agent_opencode ?? {
+    data: {}, error: null, loaded: false, configured: false,
+  };
+  State.integrations.agent_opencode = { ...opencode, configured: State.opencodeInstalled };
+
+  // Keys are known only now, so re-decide which service pills the island shows.
+  State.loadIntegrationTasks();
 }
 
 function handle(island: Island, update: IntegrationUpdate) {

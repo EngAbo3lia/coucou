@@ -68,6 +68,13 @@ export const INTEGRATION_AGENTS: AgentTask[] = [
   task("integration_stripe", "Stripe", "#0570DE", "n8n"),
 ];
 
+/** The opencode pill. Declared while its plugin is installed, so the island
+ *  shows opencode instead of the unused Claude Code hook. */
+export const OPENCODE_AGENT: AgentTask = {
+  id: "agent_opencode", name: "opencode", color: "#8B5CF6",
+  state: "idle", stepIndex: 0, steps: [], source: "agent", isIntegration: true,
+};
+
 export const TOGGLEABLE_INTEGRATION_IDS = [
   "integration_resend", "integration_n8n", "integration_vercel", "integration_github",
   "integration_notion", "integration_calcom", "integration_stripe",
@@ -132,6 +139,8 @@ class AppState {
 
   isPinned = false;
   paused = false;
+  /** True when Coucou's opencode plugin is installed (from Rust `boot`). */
+  opencodeInstalled = false;
 
   uploadProgress = 0;
   uploadDuration = 2.4;
@@ -205,32 +214,55 @@ class AppState {
     this.notify();
   }
 
-  /** loadIntegrationTasks() — VS Code always on, the rest opt-in (max 4). */
+  /**
+   * loadIntegrationTasks() — decides which pills the island shows.
+   *
+   * A pill only appears when it can do something for this user:
+   * - opencode when its plugin is installed,
+   * - the Claude Code pill when its hooks are installed (or as the last-resort
+   *   anchor so Settings stays reachable from the island),
+   * - a service integration only once its key is present, so unused services
+   *   never sit there red.
+   */
   loadIntegrationTasks() {
+    const opencode = this.opencodeInstalled;
     for (const proto of INTEGRATION_AGENTS) {
-      const shouldLoad =
-        proto.id === "integration_claude" || this.settings.activeIntegrations.includes(proto.id);
+      let shouldLoad: boolean;
+      if (proto.id === "integration_claude") {
+        shouldLoad = this.settings.hooksInstalled || !opencode;
+      } else {
+        shouldLoad = this.settings.activeIntegrations.includes(proto.id)
+          && (this.integrations[proto.id]?.configured ?? false);
+      }
       const idx = this.tasks.findIndex((t) => t.id === proto.id);
       if (shouldLoad && idx < 0) this.tasks.push({ ...proto, steps: [] });
       if (!shouldLoad && idx >= 0) this.tasks.splice(idx, 1);
     }
-    // Order: integration_claude first, then agent_* pills (visible in slice(0,4)),
-    // then other integrations in declaration order.
+
+    // opencode: declared only while its plugin is installed.
+    const oidx = this.tasks.findIndex((t) => t.id === OPENCODE_AGENT.id);
+    if (opencode && oidx < 0) this.tasks.push({ ...OPENCODE_AGENT, steps: [] });
+    if (!opencode && oidx >= 0) this.tasks.splice(oidx, 1);
+
+    // Order: opencode, then integration_claude, then agent_* pills (visible in
+    // slice(0,4)), then other integrations in declaration order.
     const order = INTEGRATION_AGENTS.map((t) => t.id);
     this.tasks.sort((a, b) => {
-      const isAgentA = a.id.startsWith("agent_");
-      const isAgentB = b.id.startsWith("agent_");
-      // integration_claude always first
+      if (a.id === "agent_opencode") return -1;
+      if (b.id === "agent_opencode") return 1;
       if (a.id === "integration_claude") return -1;
       if (b.id === "integration_claude") return 1;
-      // agent_* before other integrations; preserve insertion order among themselves
+      const isAgentA = a.id.startsWith("agent_");
+      const isAgentB = b.id.startsWith("agent_");
       if (isAgentA && !isAgentB) return -1;
       if (isAgentB && !isAgentA) return 1;
       if (isAgentA && isAgentB) return 0;
-      // both known integrations → declaration order
       return order.indexOf(a.id) - order.indexOf(b.id);
     });
-    if (!this.focusId) this.focusId = "integration_claude";
+
+    if (!this.focusId || !this.tasks.some((t) => t.id === this.focusId)) {
+      this.focusId = this.tasks[0]?.id ?? null;
+    }
     this.notify();
   }
 

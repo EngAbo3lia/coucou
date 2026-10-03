@@ -57,10 +57,13 @@ function idleCard(task: AgentTask, openSettings: () => void): HTMLElement {
   const info = State.integrations[task.id];
   const configured = info?.configured ?? false;
   const error = info?.error ?? null;
-  // The Claude Code pill is about hooks, not a key — the macOS wording would be
-  // misleading here.
-  const missing = task.id === "integration_claude" ? "Hooks not installed" : "Key not configured";
-  const label = error ?? (configured ? "Connected · loading…" : missing);
+  // The Claude Code pill is about hooks, the opencode pill about its plugin —
+  // the macOS wording would be misleading here.
+  const missing = task.id === "integration_claude" ? "Hooks not installed"
+    : task.id === "agent_opencode" ? "Plugin not installed"
+    : "Key not configured";
+  const ready = task.id === "agent_opencode" ? "Watching for sessions" : "Connected · loading…";
+  const label = error ?? (configured ? ready : missing);
   const statusColor = error || !configured ? "#F4505E" : "#22C55E";
 
   const actions = h("div", { class: "int-actions" });
@@ -92,7 +95,12 @@ function idleCard(task: AgentTask, openSettings: () => void): HTMLElement {
       }),
     );
   }
-  if (configured) {
+  if (task.id === "agent_opencode") {
+    // No poller to refresh — the useful action is managing the plugin.
+    actions.append(
+      h("button", { class: "link-btn", style: "color:#8e939c", text: "Settings…", onclick: openSettings }),
+    );
+  } else if (configured) {
     actions.append(
       h("button", {
         class: "link-btn",
@@ -107,10 +115,11 @@ function idleCard(task: AgentTask, openSettings: () => void): HTMLElement {
     );
   }
 
+  const subtitle = task.id === "agent_opencode" ? "Agent" : "Integration";
   return h(
     "div",
     { class: "int-card" },
-    header(task.color, task.id === "integration_claude" ? "VS Code" : task.name, "Integration"),
+    header(task.color, task.id === "integration_claude" ? "VS Code" : task.name, subtitle),
     h("div", { class: "int-status" }, dot(statusColor, 5), h("span", { text: label })),
     actions,
   );

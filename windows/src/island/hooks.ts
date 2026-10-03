@@ -44,6 +44,12 @@ function agentColor(name: string): string {
   return FALLBACK_COLORS[Math.abs(h) % FALLBACK_COLORS.length];
 }
 
+/** A pill declared by loadIntegrationTasks (opencode) survives a stop; a purely
+ *  dynamic agent pill does not. */
+function isDeclaredPill(id: string): boolean {
+  return State.tasks.find((t) => t.id === id)?.isIntegration === true;
+}
+
 const PROJECT_ALIASES: Record<string, string> = {
   "notch-buddy": "Notch Buddy",
   notchbuddy: "Notch Buddy",
@@ -237,7 +243,7 @@ function handleHook(island: Island, payload: HookPayload) {
       if (focused) surface("finished", true);
       else State.setPillBadge(agentId, "finished");
       window.setTimeout(() => {
-        if (isExternalAgent) {
+        if (isExternalAgent && !isDeclaredPill(agentId)) {
           State.removeTask(agentId);
         } else {
           State.updateTask(agentId, "idle");
@@ -254,11 +260,11 @@ function handleHook(island: Island, payload: HookPayload) {
       break;
 
     case "SessionEnd":
-      if (isExternalAgent) {
+      if (isExternalAgent && !isDeclaredPill(agentId)) {
         State.removeTask(agentId);
       } else {
         State.updateTask(agentId, "idle");
-        clearSession();
+        if (!isExternalAgent) clearSession();
       }
       break;
 

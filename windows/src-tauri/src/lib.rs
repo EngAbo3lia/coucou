@@ -45,6 +45,9 @@ pub struct BootInfo {
     screen: ScreenInfo,
     version: String,
     hook_path: String,
+    /// True when Coucou's opencode plugin is installed, so the island can show
+    /// the opencode pill instead of the unused Claude Code one.
+    opencode_installed: bool,
     /// False where the OS has no global cursor (Wayland): the page then reports
     /// the cursor from its own mouse events.
     cursor_poll: bool,
@@ -61,6 +64,7 @@ fn boot(app: AppHandle, shared: State<Shared>) -> BootInfo {
         screen,
         version: env!("CARGO_PKG_VERSION").to_string(),
         hook_path: settings::hook_exe_path().to_string_lossy().to_string(),
+        opencode_installed: opencode::status().installed,
         cursor_poll: platform::CURSOR_POLL,
     }
 }
@@ -226,14 +230,18 @@ fn opencode_status() -> opencode::OpenCodeStatus {
 
 /// Copies Coucou's opencode plugin into the user's opencode config.
 #[tauri::command]
-fn opencode_install() -> Result<String, String> {
-    opencode::install()
+fn opencode_install(app: AppHandle) -> Result<String, String> {
+    let result = opencode::install();
+    let _ = app.emit("opencode-changed", opencode::status().installed);
+    result
 }
 
 /// Removes Coucou's plugin — only when it is still ours.
 #[tauri::command]
-fn opencode_uninstall() -> Result<(), String> {
-    opencode::uninstall()
+fn opencode_uninstall(app: AppHandle) -> Result<(), String> {
+    let result = opencode::uninstall();
+    let _ = app.emit("opencode-changed", opencode::status().installed);
+    result
 }
 
 #[tauri::command]

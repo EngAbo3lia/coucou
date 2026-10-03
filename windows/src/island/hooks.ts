@@ -25,6 +25,8 @@ interface HookPayload {
   tool_input?: Record<string, unknown>;
   /** Optional agent tag: lowercase, digits and hyphens, ≤ 24 chars. */
   coucou_agent?: string;
+  /** opencode sends the session title alongside its id. */
+  title?: string;
 }
 
 /** Same rule as HookServer.validateAgent on macOS. "claude" is reserved. */
@@ -142,6 +144,18 @@ function clearSession() {
   t.pillBadge = null;
 }
 
+/** Records which project/session a pill follows. opencode sends cwd and a
+ *  session id on every event; Claude Code only sends cwd. */
+function stampSession(id: string, projectName: string, cwd: string, sessionId: string | null) {
+  const t = State.tasks.find((x) => x.id === id);
+  if (!t) return;
+  if (cwd) {
+    t.sessionCwd = cwd;
+    if (t.source === "agent") t.projectLabel = projectName;
+  }
+  if (sessionId) t.sessionId = sessionId;
+}
+
 export function registerHookHandlers(island: Island) {
   void onEvent<HookPayload>("hook", (payload) => handleHook(island, payload));
 }
@@ -186,6 +200,7 @@ function handleHook(island: Island, payload: HookPayload) {
     } else {
       upsert(projectName, cwd);
     }
+    stampSession(agentId, projectName, cwd, payload.session_id ?? null);
   };
 
   switch (name) {

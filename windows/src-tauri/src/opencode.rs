@@ -9,9 +9,12 @@
 // The plugin is embedded in the binary at build time, so there is nothing to
 // ship alongside it.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::platform;
 
@@ -90,6 +93,182 @@ pub fn uninstall() -> Result<(), String> {
         Ok(_) => Err("coucou.js is not Coucou's — remove it by hand if you want it gone.".into()),
         Err(_) => Ok(()), // nothing installed
     }
+}
+
+// ── Sessions ──────────────────────────────────────────────────────────────────
+// The plugin reports live session ids over the relay; the CLI lists the rest.
+// Together they let the island show recent sessions and resume one exactly.
+
+/// Ids seen in plugin events, so the list can mark the running ones.
+static LIVE: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn live() -> &'static Mutex<HashSet<String>> {
+    LIVE.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Records an opencode session id reported by the plugin (no-op when empty).
+pub fn note_session(id: &str) {
+    if id.is_empty() {
+        return;
+    }
+    if let Ok(mut set) = live().lock() {
+        set.insert(id.to_string());
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpencodeSession {
+    pub id: String,
+    pub title: String,
+    pub directory: String,
+    pub updated: i64,
+    pub created: i64,
+    pub live: bool,
+}
+
+#[derive(Deserialize)]
+struct RawSession {
+    id: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    directory: String,
+    #[serde(default)]
+    updated: i64,
+    #[serde(default)]
+    created: i64,
+}
+
+fn opencode_exe() -> Result<PathBuf, String> {
+    platform::find_on_path("opencode").ok_or_else(|| "opencode is not on PATH".to_string())
+}
+
+/// Most recent sessions, newest first, from `opencode session list --format json`.
+pub fn sessions(limit: u16) -> Result<Vec<OpencodeSession>, String> {
+    let n = limit.clamp(1, 50).to_string();
+    let mut cmd = Command::new(opencode_exe()?);
+    cmd.args(["session", "list", "-n", &n, "--format", "json"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null());
+    platform::no_console(&mut cmd);
+    let out = cmd.output().map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        return Err("opencode session list failed".into());
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let raw: Vec<RawSession> =
+        serde_json::from_str(&text).map_err(|e| format!("bad session list json: {e}"))?;
+    let live = live().lock().map(|s| s.clone()).unwrap_or_default();
+    let mut list: Vec<OpencodeSession> = raw
+        .into_iter()
+        .map(|r| OpencodeSession {
+            live: live.contains(&r.id),
+            id: r.id,
+            title: r.title,
+            directory: r.directory,
+            updated: r.updated,
+            created: r.created,
+        })
+        .collect();
+    list.sort_by(|a, b| b.updated.cmp(&a.updated));
+    Ok(list)
+}
+
+/// Resumes a session: brings an existing opencode window forward, or opens the
+/// session in a new terminal. Returns true when a window was focused.
+pub fn continue_session(session_id: &str, directory: &str) -> Result<bool, String> {
+    if session_id.is_empty() {
+        return Err("missing session id".into());
+    }
+    if focus_opencode_window(directory) {
+        return Ok(true);
+    }
+    spawn_terminal(session_id, directory)?;
+    Ok(false)
+}
+
+/// New terminal for a session: a Windows Terminal tab when available, a plain
+/// console otherwise. Unlike the hook helpers this one must be *visible*.
+fn spawn_terminal(session_id: &str, directory: &str) -> Result<(), String> {
+    let exe = opencode_exe()?.to_string_lossy().to_string();
+    if let Some(wt) = platform::find_on_path("wt") {
+        let opened = Command::new(wt)
+            .args(["-w", "0", "new-tab", "--title", "opencode", "-d", directory])
+            .arg(&exe)
+            .args(["-s", session_id])
+            .current_dir(directory)
+            .spawn()
+            .is_ok();
+        if opened {
+            return Ok(());
+        }
+    }
+    Command::new("cmd")
+        .args(["/C", "start", "", &exe, "-s", session_id])
+        .current_dir(directory)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Best effort: match a visible window whose title carries "opencode" and, when
+/// known, the project folder. Windows Terminal shares one window across tabs, so
+/// a miss just means we spawn a new tab instead.
+#[cfg(windows)]
+fn focus_opencode_window(directory: &str) -> bool {
+    use ::windows::core::BOOL;
+    use ::windows::Win32::Foundation::{HWND, LPARAM};
+    use ::windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowTextLengthW, GetWindowTextW, IsWindowVisible, SetForegroundWindow,
+        ShowWindow, SW_RESTORE,
+    };
+
+    struct Ctx {
+        needle: String,
+        found: bool,
+    }
+
+    unsafe extern "system" fn cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let ctx = unsafe { &mut *(lparam.0 as *mut Ctx) };
+        if ctx.found || !unsafe { IsWindowVisible(hwnd).as_bool() } {
+            return BOOL(1);
+        }
+        let len = unsafe { GetWindowTextLengthW(hwnd) };
+        if len <= 0 {
+            return BOOL(1);
+        }
+        let mut buf = vec![0u16; (len + 1) as usize];
+        let n = unsafe { GetWindowTextW(hwnd, &mut buf) };
+        if n <= 0 {
+            return BOOL(1);
+        }
+        let title = String::from_utf16_lossy(&buf[..n as usize]).to_lowercase();
+        if title.contains("opencode") && (ctx.needle.is_empty() || title.contains(&ctx.needle)) {
+            unsafe {
+                let _ = ShowWindow(hwnd, SW_RESTORE);
+                let _ = SetForegroundWindow(hwnd);
+            }
+            ctx.found = true;
+            return BOOL(0);
+        }
+        BOOL(1)
+    }
+
+    let leaf = std::path::Path::new(directory)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let mut ctx = Ctx { needle: leaf, found: false };
+    unsafe {
+        let _ = EnumWindows(Some(cb), LPARAM(&mut ctx as *mut Ctx as isize));
+    }
+    ctx.found
+}
+
+#[cfg(not(windows))]
+fn focus_opencode_window(_directory: &str) -> bool {
+    false
 }
 
 fn stamp() -> String {

@@ -244,6 +244,22 @@ fn opencode_uninstall(app: AppHandle) -> Result<(), String> {
     result
 }
 
+/// Recent opencode sessions, newest first, for the island's sessions card.
+#[tauri::command]
+async fn opencode_sessions(limit: u16) -> Result<Vec<opencode::OpencodeSession>, String> {
+    tauri::async_runtime::spawn_blocking(move || opencode::sessions(limit))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Resumes a session: focuses its window, or opens it in a new terminal.
+#[tauri::command]
+async fn opencode_continue(session_id: String, directory: String) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || opencode::continue_session(&session_id, &directory))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 fn approval_decision(app: AppHandle, request_id: String, decision: String) {
     pipe::answer(&app, &request_id, &decision);
@@ -439,6 +455,8 @@ pub fn run() {
             opencode_status,
             opencode_install,
             opencode_uninstall,
+            opencode_sessions,
+            opencode_continue,
             approval_decision,
             approval_ack,
             approval_decline,

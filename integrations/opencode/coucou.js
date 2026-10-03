@@ -63,45 +63,67 @@ function sessionId(properties) {
     properties?.info?.sessionID ??
     properties?.sessionID ??
     properties?.session_id ??
-    AGENT
+    null
+  )
+}
+
+/** opencode's session title, when the event carries one. */
+function sessionTitle(properties) {
+  return (
+    properties?.info?.title ??
+    properties?.info?.summary?.title ??
+    properties?.title ??
+    null
   )
 }
 
 export const CoucouPlugin = async ({ directory }) => {
+  // Coucou pairs a pill with the exact session so "Continue" can resume it and
+  // so two sessions in two folders never read as the same one. cwd and the id
+  // therefore ride on every event, not just session.created.
+  const base = { cwd: directory }
   return {
     event: async ({ event }) => {
       const properties = event?.properties ?? {}
+      const id = sessionId(properties)
+      const title = sessionTitle(properties)
+      const withMeta = (payload) => {
+        const out = { ...base, ...payload }
+        if (id) out.session_id = id
+        if (title) out.title = title
+        return out
+      }
       switch (event?.type) {
         case "session.created":
-          send("SessionStart", { session_id: sessionId(properties), cwd: directory })
+          send("SessionStart", withMeta({ session_id: id ?? undefined }))
           break
         case "message.updated":
           if (properties?.info?.role === "user") {
-            send("UserPromptSubmit", {
-              session_id: sessionId(properties),
+            send("UserPromptSubmit", withMeta({
               prompt: properties.info.summary?.title ?? "Working…",
-            })
+            }))
           }
           break
         case "session.idle":
-          send("Stop", { session_id: sessionId(properties) })
+          send("Stop", withMeta({}))
           break
         case "session.error":
-          send("StopFailure", { session_id: sessionId(properties) })
+          send("StopFailure", withMeta({}))
           break
       }
     },
     "tool.execute.before": async (input) => {
       send("PreToolUse", {
-        session_id: input?.sessionID ?? input?.session_id ?? AGENT,
+        ...base,
+        session_id: input?.sessionID ?? input?.session_id ?? undefined,
         tool_name: input?.tool,
         tool_input: input?.args,
       })
     },
     "tool.execute.after": async (input) => {
       send("PostToolUse", {
-        session_id: input?.sessionID ?? input?.session_id ?? AGENT,
-        tool_name: input?.tool,
+        ...base,
+        session_id: input?.sessionID ?? input?.session_id ?? undefined,
       })
     },
   }

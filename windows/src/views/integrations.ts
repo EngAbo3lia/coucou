@@ -7,7 +7,7 @@
 import { h, svg, clear, dot } from "./dom";
 import { ICONS } from "./icons";
 import { State, type AgentTask } from "../core/state";
-import { Bridge } from "../core/bridge";
+import { Bridge, type OpencodeSession } from "../core/bridge";
 
 /** Same shape as the Swift `timeAgo` computed properties. */
 export function timeAgo(value: unknown): string {
@@ -122,6 +122,100 @@ function idleCard(task: AgentTask, openSettings: () => void): HTMLElement {
     header(task.color, task.id === "integration_claude" ? "VS Code" : task.name, subtitle),
     h("div", { class: "int-status" }, dot(statusColor, 5), h("span", { text: label })),
     actions,
+  );
+}
+
+// ── opencode sessions ─────────────────────────────────────────────────────────
+
+/** Guards against two renders both kicking off a session fetch. */
+let opencodeFetching = false;
+
+function lastComponent(p: string): string {
+  const cleaned = p.replace(/[\\/]+$/, "");
+  const i = Math.max(cleaned.lastIndexOf("\\"), cleaned.lastIndexOf("/"));
+  return i >= 0 ? cleaned.slice(i + 1) : cleaned;
+}
+
+function shortId(id: string): string {
+  return id.length > 12 ? `${id.slice(0, 8)}…` : id;
+}
+
+/** Loads recent sessions once, caching them the way a poller would. */
+function loadOpencodeSessions() {
+  if (opencodeFetching) return;
+  opencodeFetching = true;
+  void Bridge.opencodeSessions(10)
+    .then((sessions) => {
+      State.integrations.agent_opencode = {
+        data: { sessions }, error: null, loaded: true, configured: true,
+      };
+      State.notify();
+    })
+    .catch((err) => {
+      State.integrations.agent_opencode = {
+        data: {}, error: String(err), loaded: false, configured: true,
+      };
+      State.notify();
+    })
+    .finally(() => {
+      opencodeFetching = false;
+    });
+}
+
+function skeletonRow(): HTMLElement {
+  const bar = (width: string) =>
+    h("span", { style: `width:${width};height:8px;border-radius:4px;background:#ffffff1a` });
+  return h("div", { class: "int-row" }, bar("45%"), bar("18%"));
+}
+
+function sessionRow(session: OpencodeSession, first: boolean): HTMLElement {
+  const row = listRow("#8B5CF6", first,
+    h("b", { text: session.title?.trim() || shortId(session.id) }),
+    h("span", { text: session.directory ? lastComponent(session.directory) : "" }),
+    h("span", { text: timeAgo(session.updated) }),
+  );
+  if (session.live) row.prepend(dot("#22C55E", 5));
+  row.style.cursor = "pointer";
+  row.onclick = () => void Bridge.opencodeContinue(session.id, session.directory);
+  return row;
+}
+
+/** The opencode pill's card: live + recent sessions, click one to resume it. */
+export function opencodeCard(task: AgentTask, hooks: IntegrationCardHooks): HTMLElement {
+  const info = State.integrations["agent_opencode"];
+  const sessions = (info?.data as { sessions?: OpencodeSession[] } | undefined)?.sessions ?? null;
+  const body = h("div", { class: "int-body" });
+
+  const retry = () => {
+    delete State.integrations.agent_opencode;
+    State.notify();
+  };
+
+  if (info?.error) {
+    body.append(
+      h("div", { class: "int-status" }, dot("#F4505E", 5), h("span", { text: "Could not read sessions" })),
+      h("button", { class: "link-btn", style: "color:#8e939c", text: "Retry", onclick: retry }),
+    );
+  } else if (!sessions) {
+    loadOpencodeSessions();
+    body.append(skeletonRow(), skeletonRow(), skeletonRow());
+  } else if (sessions.length === 0) {
+    body.append(
+      h("div", { class: "int-status" }, dot("#8e939c", 5), h("span", { text: "No opencode session yet" })),
+    );
+  } else {
+    sessions.forEach((s, i) => body.append(sessionRow(s, i === 0)));
+  }
+
+  return h(
+    "div",
+    { class: "int-card" },
+    header(task.color, task.name, "Agent"),
+    body,
+    h("div", { class: "int-actions" },
+      h("button", { class: "link-btn", style: `color:${task.color}d9`, text: "Refresh", onclick: retry }),
+      h("button", { class: "link-btn", style: "color:#8e939c", text: "Settings…", onclick: hooks.openSettings }),
+    ),
   );
 }
 
@@ -413,6 +507,9 @@ export function hasIntegrationData(id: string): boolean {
 }
 
 export function renderIntegrationCard(task: AgentTask, hooks: IntegrationCardHooks): HTMLElement {
+  if (task.id === "agent_opencode") {
+    return opencodeCard(task, hooks);
+  }
   if (task.id === "integration_n8n") {
     const hasActivity = task.steps.length > 0 && (task.state === "finished" || task.state === "error");
     return hooks.detailOpen && hasActivity

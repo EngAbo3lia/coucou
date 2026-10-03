@@ -17,6 +17,12 @@ use crate::platform::{self, cursor_physical, left_button_down};
 /// Logical size of the full window — the largest island view, like the macOS panel.
 pub const PANEL_W: f64 = 720.0;
 pub const PANEL_H: f64 = 320.0;
+/// Compact panel: a single centred pill, no pill row, no empty column. Used when
+/// the user has turned the pill row off or hidden every pill.
+pub const COMPACT_W: f64 = 340.0;
+pub const COMPACT_H: f64 = 160.0;
+/// Chat panel: the window grows taller so a conversation has room to breathe.
+pub const CHAT_H: f64 = 560.0;
 /// Logical size of the invisible strip that wakes the island when it is hidden.
 pub const STRIP_W: f64 = 240.0;
 pub const STRIP_H: f64 = 6.0;
@@ -58,6 +64,11 @@ pub struct PollGate {
     active: Mutex<bool>,
     cv: Condvar,
     pub collapsed: AtomicBool,
+    /// Single-centred-pill mode. Set by the front end, which knows how many pills
+    /// are really visible.
+    pub compact: AtomicBool,
+    /// Chat mode: grow the window taller so a conversation has room.
+    pub chat: AtomicBool,
     pub rect: Mutex<IslandRect>,
     /// Mirrors the window flag so we only call into the OS when it changes.
     ignoring: AtomicBool,
@@ -69,6 +80,8 @@ impl PollGate {
             active: Mutex::new(false),
             cv: Condvar::new(),
             collapsed: AtomicBool::new(true),
+            compact: AtomicBool::new(false),
+            chat: AtomicBool::new(false),
             rect: Mutex::new(IslandRect::default()),
             ignoring: AtomicBool::new(false),
         }
@@ -148,8 +161,10 @@ pub fn screen_info(app: &AppHandle, pref: &str) -> ScreenInfo {
     }
 }
 
-/// Places and sizes the window. `collapsed` picks the wake strip instead of the panel.
-pub fn apply_geometry(app: &AppHandle, pref: &str, collapsed: bool) {
+/// Places and sizes the window. `collapsed` picks the wake strip instead of the
+/// panel; `compact` picks the single-pill panel; `chat` grows the panel taller
+/// for a conversation.
+pub fn apply_geometry(app: &AppHandle, pref: &str, collapsed: bool, compact: bool, chat: bool) {
     let Some(win) = window(app) else { return };
     let Some(m) = target_monitor(app, pref) else { return };
 
@@ -157,7 +172,15 @@ pub fn apply_geometry(app: &AppHandle, pref: &str, collapsed: bool) {
     let mp = *m.position();
     let ms = *m.size();
 
-    let (lw, lh) = if collapsed { (STRIP_W, STRIP_H) } else { (PANEL_W, PANEL_H) };
+    let (lw, lh) = if collapsed {
+        (STRIP_W, STRIP_H)
+    } else if chat {
+        (PANEL_W, CHAT_H)
+    } else if compact {
+        (COMPACT_W, COMPACT_H)
+    } else {
+        (PANEL_W, PANEL_H)
+    };
     let pw = (lw * scale).round().max(1.0) as u32;
     let ph = (lh * scale).round().max(1.0) as u32;
     let x = mp.x + (ms.width as i32 - pw as i32) / 2;

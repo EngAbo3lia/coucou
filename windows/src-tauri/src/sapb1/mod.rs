@@ -24,8 +24,10 @@
 
 pub mod ask;
 pub mod catalogue;
+pub mod dates;
 pub mod doctypes;
 pub mod metadata;
+pub mod planner;
 pub mod query;
 pub mod transport;
 
@@ -141,6 +143,10 @@ mod tests {
     #[test]
     fn offline_catalogue_knows_report_fields() {
         for (set, fields) in query::REPORT_FIELDS {
+            // Count-only sets have no report fields to check.
+            if fields.is_empty() {
+                continue;
+            }
             let ty = catalogue::type_for_set(set).expect("type for set");
             for field in *fields {
                 assert!(
@@ -170,5 +176,63 @@ mod tests {
         let probe = tauri::async_runtime::block_on(probe(&credentials)).expect("probe");
         println!("{probe:#?}");
         assert!(probe.ready, "not ready: {:?}", probe.sets);
+    }
+
+    /// Every intent the island chat can reach, against a real server. This is the
+    /// only proof that the questions a user types produce figures rather than an
+    /// error: `detect` alone only proves the routing, never the query.
+    ///
+    /// Reads the same Credential Manager entries the app uses, so no credential
+    /// is ever typed into a command line or left in shell history:
+    /// `cargo test --release --lib live_ask -- --ignored --nocapture`
+    #[test]
+    #[ignore = "needs a live Service Layer"]
+    fn live_ask_answers_every_intent() {
+        let c = credentials_from_secrets().expect("SAP credentials in the Credential Manager");
+        // Force the deterministic fallback so the test is stable whether or not a
+        // chat key is present: with no backend the planner errors and falls back.
+        let mut settings = crate::settings::Settings::default();
+        settings.provider = String::new();
+        settings.model = String::new();
+
+        // The exact wording that reached the help text instead of the report.
+        let cases = [
+            ("whats our orders?", "open sales orders"),
+            ("hi", "business assistant"),
+            ("sales total", "net sales"),
+            ("sales by month", "sales by month"),
+            ("top customers", "top customers"),
+            ("purchases total", "purchases"),
+            ("purchases by month", "purchases by month"),
+            ("top vendors", "top vendors"),
+            ("who owes us", "receivables"),
+            ("how many orders", "sales orders:"),
+            ("how many invoices", "sales invoices:"),
+        ];
+
+        for (question, expect) in cases {
+            let answer = tauri::async_runtime::block_on(ask::ask(&c, &settings, question))
+                .unwrap_or_else(|e| panic!("{question:?} failed: {e}"));
+            println!("--- {question} ---\n{}\nsource: {}", answer.text, answer.source);
+            assert!(
+                answer.text.to_lowercase().contains(expect),
+                "{question:?} gave {:?}, which does not mention {expect:?}",
+                answer.text
+            );
+            if question == "hi" {
+                // A greeting must welcome first, never dump a technical list, and
+                // never offer clickable chips.
+                assert_eq!(answer.kind, "answer");
+                assert!(answer.suggestions.is_empty());
+                assert!(answer.rows.is_empty());
+                assert_eq!(answer.source, "no query run");
+            } else {
+                assert!(!answer.source.is_empty(), "{question:?} reported no source");
+                assert!(
+                    answer.suggestions.is_empty(),
+                    "{question:?} was understood, so it should not suggest anything"
+                );
+            }
+        }
     }
 }

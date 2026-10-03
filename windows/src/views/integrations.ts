@@ -519,7 +519,7 @@ function n8nDetail(task: AgentTask, onBack: () => void): HTMLElement {
   );
 }
 
-// ── SAP B1 Harness ────────────────────────────────────────────────────────────
+// ── SAP Harness ───────────────────────────────────────────────────────────────
 //
 // The one card that configures itself: the ERP is a company database, not a
 // public service, so its credentials live here in the pill instead of a
@@ -538,6 +538,8 @@ let sapKeys: Record<string, boolean> | null = null;
 let sapKeysLoading = false;
 /** Guards against two clicks both starting a login. */
 let sapProbing = false;
+/** Guards the "connect, then open the chat" path in the Ask the ERP button. */
+let sapAsking = false;
 
 async function loadSapKeys() {
   if (sapKeys || sapKeysLoading) return;
@@ -586,49 +588,6 @@ export function sapB1Card(task: AgentTask, hooks: IntegrationCardHooks): HTMLEle
     : complete ? "#f5a524"
     : "#F4505E";
 
-  const rows: Node[] = [];
-  for (const field of SAP_FIELDS) {
-    const input = h("input", {
-      class: "sap-input",
-      type: field.secret ? "password" : "text",
-      placeholder: stored(field.key) ? "••••••••  (stored)" : field.placeholder,
-      autocomplete: "off",
-      spellcheck: false,
-    }) as HTMLInputElement;
-
-    const mark = dot(stored(field.key) ? "#22C55E" : "#8e939c", 5);
-    const save = h("button", { class: "link-btn", text: "Save" });
-    save.addEventListener("click", () => void (async () => {
-      const value = input.value.trim();
-      if (!value) return;
-      save.textContent = "Saving…";
-      try {
-        await Bridge.secretSet(field.key, value);
-        input.value = "";
-        // A new credential invalidates the old probe result.
-        sapKeys = { ...(sapKeys ?? {}), [field.key]: true };
-        setSapState(task.id, { data: {}, error: null, loaded: false, configured: completeAfterSave() });
-      } catch (err) {
-        setSapState(task.id, { error: String(err).replace(/^Error:\s*/, "") });
-      }
-      save.textContent = "Save";
-    })());
-
-    rows.push(
-      h("div", { class: "int-row sap-row" },
-        h("span", { class: "sap-label", text: field.label }),
-        input,
-        save,
-        mark,
-      ),
-    );
-  }
-
-  function completeAfterSave() {
-    const next = { ...(sapKeys ?? {}) };
-    return SAP_FIELDS.every((f) => next[f.key] === true);
-  }
-
   const actions = h("div", { class: "int-actions" });
   const test = h("button", { class: "link-btn", style: `color:${task.color}d9`, text: "Test connection" });
   const chat = h("button", {
@@ -636,10 +595,44 @@ export function sapB1Card(task: AgentTask, hooks: IntegrationCardHooks): HTMLEle
     style: `color:${probe?.ready ? `${task.color}d9` : "#8e939c"}`,
     text: "Ask the ERP…",
   });
-  chat.addEventListener("click", () => {
-    if (probe?.ready) hooks.chatWithErp();
+  const chatHint = h("span", { class: "hint" });
+  if (!probe?.ready && sapKeys) {
+    chatHint.textContent = complete
+      ? "Not tested yet — this will connect first."
+      : `Add ${missing.map((f) => f.label).join(", ")} first.`;
+  }
+
+  const configure = h("button", {
+    class: "link-btn",
+    text: "Configure…",
+    onclick: () => void Bridge.openSettingsWindow("integrations"),
   });
-  actions.append(test, chat);
+
+  // Never a dead button: if the ERP has not been proven reachable yet, connect
+  // now and only open the chat once the server actually answered.
+  chat.addEventListener("click", () => void (async () => {
+    if (sapProbing || sapAsking) return;
+    if (probe?.ready) { hooks.chatWithErp(); return; }
+    if (!complete) { chatHint.textContent = `Add ${missing.map((f) => f.label).join(", ")} first.`; return; }
+    sapAsking = true;
+    chat.textContent = "Connecting…";
+    setSapState(task.id, { error: null });
+    try {
+      const result = await Bridge.sapB1Probe();
+      setSapState(task.id, { data: { probe: result }, error: null, loaded: true, configured: true });
+      if (result.ready) hooks.chatWithErp();
+      else chatHint.textContent = "The server answered but is not ready — see the status above.";
+    } catch (err) {
+      const message = String(err).replace(/^Error:\s*/, "");
+      setSapState(task.id, { error: message });
+      chatHint.textContent = message;
+    } finally {
+      sapAsking = false;
+      chat.textContent = "Ask the ERP…";
+      State.notify();
+    }
+  })());
+  actions.append(test, chat, configure, chatHint);
 
   test.addEventListener("click", () => void (async () => {
     if (sapProbing) return;
@@ -661,7 +654,6 @@ export function sapB1Card(task: AgentTask, hooks: IntegrationCardHooks): HTMLEle
     { class: "int-card" },
     header(task.color, task.name, "ERP"),
     h("div", { class: "int-status" }, dot(statusColor, 5), h("span", { text: label })),
-    ...rows,
     actions,
   );
 }

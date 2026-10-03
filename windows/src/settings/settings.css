@@ -37,9 +37,185 @@ body.settings-window {
   display: flex;
   flex-direction: column;
   gap: 18px;
-  max-width: 720px;
+  max-width: 940px;
   margin: 0 auto;
 }
+
+.settings-body {
+  display: flex;
+  gap: 20px;
+  align-items: flex-start;
+}
+
+.settings-nav {
+  flex: 0 0 208px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  position: sticky;
+  top: 0;
+}
+
+.settings-nav button {
+  text-align: left;
+  padding: 8px 12px;
+  border-radius: 8px;
+  font: 500 13px var(--font);
+  color: var(--dim);
+  border: none;
+  background: none;
+  cursor: pointer;
+}
+
+.settings-nav button.on {
+  background: var(--card);
+  color: var(--ink);
+}
+
+.settings-page {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.settings-page .page {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.settings-page .page > h2 {
+  font: 600 15px var(--font);
+  margin: 0;
+}
+
+section.group {
+  background: var(--card);
+  border: 1px solid var(--hairline);
+  border-radius: 14px;
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+section.group h3 {
+  font: 600 13px var(--font);
+  color: var(--ink);
+  margin: 0 0 2px;
+}
+
+/* Two-pane models page. */
+.models-layout {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.providers {
+  flex: 0 0 156px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.provider-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--hairline);
+  background: none;
+  color: var(--ink);
+  font: 500 12.5px var(--font);
+  cursor: pointer;
+}
+
+.provider-item.on {
+  background: var(--card);
+  border-color: rgba(255, 255, 255, 0.14);
+}
+
+.provider-key {
+  margin-left: auto;
+  color: var(--dim-2);
+  font-size: 12px;
+}
+
+.provider-add {
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px dashed var(--hairline);
+  background: none;
+  color: var(--dim);
+  font: 500 12.5px var(--font);
+  cursor: pointer;
+}
+
+.catalog {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.catalog-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font: 600 14px var(--font);
+}
+
+.model-table {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.model-row {
+  display: grid;
+  grid-template-columns: 1fr 72px 72px auto;
+  gap: 10px;
+  align-items: center;
+  padding: 6px 8px;
+  border-radius: 6px;
+  font: 400 12.5px var(--font);
+}
+
+.model-row.head {
+  color: var(--dim-2);
+  font-weight: 600;
+}
+
+.model-row .name { font-weight: 500; }
+.model-row .ctx, .model-row .cost { color: var(--dim); text-align: right; }
+.model-row .actions { display: flex; gap: 6px; justify-content: flex-end; }
+.model-row .pin { color: var(--amber); }
+.model-row .use { color: var(--dim); }
+.model-row .use:disabled { color: var(--dim-2); }
+
+/* Dialog. */
+.dialog {
+  border: 1px solid var(--hairline);
+  border-radius: 14px;
+  background: var(--card);
+  color: var(--ink);
+  padding: 18px;
+  max-width: 520px;
+}
+
+.dialog::backdrop {
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.dialog-title {
+  font: 600 14px var(--font);
+  margin-bottom: 12px;
+}
+
+.dialog .row { margin-top: 12px; }
+.dialog .row > label { min-width: 84px; }
 
 h1 {
   font: 600 17px var(--font);

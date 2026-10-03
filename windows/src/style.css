@@ -396,6 +396,15 @@ body {
   flex: 1 1 auto;
 }
 
+/* No pill row: the focused card is the whole island, centred in the compact
+   340×160 window. No empty column, no overflow. */
+.overview.compact > .left {
+  flex: 1 1 auto;
+  width: auto;
+  max-width: 322px;
+  margin: 0 auto;
+}
+
 .card-body {
   position: relative;
   z-index: 1;
@@ -801,6 +810,41 @@ input[type="range"]::-webkit-slider-thumb {
   color: var(--ink);
 }
 
+.chip.alt {
+  cursor: pointer;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--dim-2);
+}
+
+.chip.alt:hover {
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.11);
+}
+
+.suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  padding: 0 14px 8px;
+}
+
+.suggestion {
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--ink-2);
+  font: 400 11.5px var(--font);
+  cursor: pointer;
+  transition: background 0.15s ease-out, border-color 0.15s ease-out;
+}
+
+.suggestion:hover {
+  background: rgba(255, 255, 255, 0.13);
+  border-color: rgba(255, 255, 255, 0.34);
+  color: var(--ink);
+}
+
 .chat-log {
   flex: 1 1 auto;
   min-height: 0;
@@ -838,6 +882,101 @@ input[type="range"]::-webkit-slider-thumb {
   white-space: pre-wrap;
   padding-right: 8px;
   user-select: text;
+}
+
+/* The "what I'll do" step, before an ERP result. Reads as planning, not an
+   answer, so it is muted and indented. */
+.plan {
+  font: 400 11.5px var(--font);
+  font-style: italic;
+  color: var(--dim-3);
+  padding: 2px 8px 6px;
+  user-select: text;
+}
+
+/* An ERP result rendered as a report: title, a bar chart, and the total. */
+.report {
+  background: rgba(99, 102, 241, 0.08);
+  border: 1px solid rgba(99, 102, 241, 0.22);
+  border-radius: 10px;
+  padding: 10px 12px;
+  max-width: 100%;
+  user-select: text;
+}
+
+.report-title {
+  font: 600 12.5px var(--font);
+  color: var(--ink-2);
+  margin-bottom: 8px;
+}
+
+.report-chart {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.bar-row {
+  display: grid;
+  grid-template-columns: 88px 1fr 64px;
+  gap: 8px;
+  align-items: center;
+}
+
+.bar-label {
+  font: 400 11px var(--font);
+  color: var(--dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bar-track {
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 3px;
+  height: 12px;
+  overflow: hidden;
+}
+
+.bar-fill {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, #6366f1, #8b5cf6);
+  border-radius: 3px;
+}
+
+.bar-value {
+  font: 500 11px var(--font);
+  color: var(--ink-2);
+  text-align: right;
+}
+
+.report-total {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  padding-top: 8px;
+  font: 500 11.5px var(--font);
+  color: var(--dim);
+}
+
+.report-total b {
+  color: var(--ink-2);
+  font-size: 13px;
+}
+
+.report-partial {
+  color: var(--amber);
+  font-size: 10.5px;
+}
+
+.report-note {
+  margin-top: 6px;
+  font: 400 11.5px var(--font);
+  color: var(--dim);
+  white-space: pre-wrap;
 }
 
 .typing {
@@ -1127,6 +1266,14 @@ input[type="range"]::-webkit-slider-thumb {
   padding-top: 6px;
 }
 
+/* Why an action is unavailable, said where the action is. A control that cannot
+   work must never be a silent no-op. */
+.int-actions .hint {
+  flex: 1 1 100%;
+  font: 400 11px var(--font);
+  color: var(--dim-3);
+}
+
 .int-rows {
   display: flex;
   flex-direction: column;
@@ -1157,7 +1304,7 @@ input[type="range"]::-webkit-slider-thumb {
   min-width: 0;
 }
 
-/* SAP B1 Harness: the pill configures the ERP itself, so it needs one input
+/* SAP Harness: the pill configures the ERP itself, so it needs one input
    row per credential — label, field, save, stored-dot. */
 .int-row.sap-row {
   gap: 6px;

@@ -74,6 +74,39 @@ pub async fn chat(
     Ok(Reply { text, blocks })
 }
 
+/// One deterministic turn: no web-search tool, no fallback banner. Used where
+/// the model must answer a fixed prompt (the ERP planner), not browse.
+pub async fn chat_plain(
+    base_url: &str,
+    model: &str,
+    key: &str,
+    system: &str,
+    user: &str,
+) -> Result<String, String> {
+    let body = json!({
+        "model": model,
+        "max_tokens": MAX_TOKENS,
+        "system": system,
+        "messages": [{ "role": "user", "content": user }],
+    });
+    let response = call(base_url, key, &body).await?;
+    let Some(blocks) = response.get("content").and_then(Value::as_array).cloned() else {
+        return Err("Unexpected API response.".into());
+    };
+    let text = blocks
+        .iter()
+        .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+        .filter_map(|b| b.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string();
+    if text.is_empty() {
+        return Err("No response text.".into());
+    }
+    Ok(text)
+}
+
 async fn call(base_url: &str, key: &str, body: &Value) -> Result<Value, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(90))

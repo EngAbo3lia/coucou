@@ -192,10 +192,12 @@ pub fn continue_session(session_id: &str, directory: &str) -> Result<bool, Strin
 /// New terminal for a session: a Windows Terminal tab when available, a plain
 /// console otherwise. Unlike the hook helpers this one must be *visible*.
 /// Answers in an existing session without opening a terminal:
-/// `opencode run -s <id> --format json <message>`. The NDJSON stream is read
-/// tolerantly — the reply is the last text field seen, whatever the shape — so
-/// a schema change in opencode does not break the chat.
-pub fn run(session_id: &str, directory: &str, message: &str) -> Result<String, String> {
+/// `opencode run -s <id> --format json <message>`. When `model` is non-empty it is
+/// passed as `-m provider/model`, so Coucou can drive a session with the model the
+/// user bound to it. The NDJSON stream is read tolerantly — the reply is the last
+/// text field seen, whatever the shape — so a schema change in opencode does not
+/// break the chat.
+pub fn run(session_id: &str, directory: &str, message: &str, model: &str) -> Result<String, String> {
     if session_id.is_empty() {
         return Err("missing session id".into());
     }
@@ -203,7 +205,11 @@ pub fn run(session_id: &str, directory: &str, message: &str) -> Result<String, S
         return Err("empty message".into());
     }
     let mut cmd = Command::new(opencode_exe()?);
-    cmd.args(["run", "-s", session_id, "--format", "json", message])
+    cmd.arg("run").arg("-s").arg(session_id).arg("--format").arg("json");
+    if !model.trim().is_empty() {
+        cmd.arg("-m").arg(model.trim());
+    }
+    cmd.arg(message)
         .stdin(Stdio::null())
         .stderr(Stdio::piped());
     if !directory.is_empty() && std::path::Path::new(directory).is_dir() {

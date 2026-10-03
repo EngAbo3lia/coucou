@@ -5,7 +5,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import type { Settings } from "./state";
+import type { ProviderConfig, Settings } from "./state";
 
 export const IS_TAURI =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -40,6 +40,12 @@ export const Bridge = {
   /** Shrink the window down to the invisible wake strip (hidden) or back to full. */
   setCollapsed: (collapsed: boolean) => call<void>("set_collapsed", { collapsed }),
 
+  /** Shrink to a single centred pill when no pill row is shown. */
+  setCompact: (compact: boolean) => call<void>("set_compact", { compact }),
+
+  /** Grow the window taller while the chat is open. */
+  setChatExpanded: (expanded: boolean) => call<void>("set_chat_expanded", { expanded }),
+
   /**
    * Pushes the island shape in window coordinates. Rust flips click-through from
    * its own cursor poll, so the flag is never a frame behind a click.
@@ -59,7 +65,7 @@ export const Bridge = {
 
   quit: () => call<void>("quit_app"),
 
-  openSettingsWindow: () => call<void>("open_settings_window"),
+  openSettingsWindow: (page?: string) => call<void>("open_settings_window", { page }),
 
   /** Writes to %LOCALAPPDATA%\Coucou\coucou.log, next to the Rust lines. */
   log: (message: string) => call<void>("log_line", { message }),
@@ -86,8 +92,8 @@ export const Bridge = {
   opencodeContinue: (sessionId: string, directory: string) =>
     callOrThrow<boolean>("opencode_continue", { sessionId, directory }),
   /** Answers in an existing session: `opencode run -s <id> <message>`. */
-  opencodeRun: (sessionId: string, directory: string, message: string) =>
-    callOrThrow<string>("opencode_run", { sessionId, directory, message }),
+  opencodeRun: (sessionId: string, directory: string, message: string, model?: string) =>
+    callOrThrow<string>("opencode_run", { sessionId, directory, message, model }),
 
   approvalDecision: (requestId: string, decision: "allow" | "deny") =>
     call<void>("approval_decision", { requestId, decision }),
@@ -101,11 +107,38 @@ export const Bridge = {
   chatSend: (query: string, context: ChatContext | null) =>
     callOrThrow<{ text: string }>("chat_send", { query, context }),
   chatReset: () => call<void>("chat_reset"),
-  /** The chat backends Rust can talk to (single source of truth in providers.rs). */
-  chatProviders: () => call<ProviderInfo[]>("chat_providers"),
-  /** Live model list for one provider, for the settings picker. */
+
+  // ── Backends and models ───────────────────────────────────────────────────
+  /** The backends the user has saved, with `hasKey` computed in Rust. */
+  providerConfigs: () => call<ProviderConfigInfo[]>("provider_configs"),
+  /** The read-only catalogue for adding a backend. */
+  providerPresets: () => call<ProviderPreset[]>("provider_presets"),
+  /** Adds a backend from a preset or a free-form name; returns its slug. */
+  providerAdd: (args: { preset?: string; name?: string; baseUrl?: string }) =>
+    callOrThrow<string>("provider_add", args),
+  providerUpdate: (id: string, patch: ProviderConfig) =>
+    callOrThrow<void>("provider_update", { id, patch }),
+  providerRemove: (id: string) => callOrThrow<void>("provider_remove", { id }),
+  providerDuplicate: (id: string, name?: string) =>
+    callOrThrow<string>("provider_duplicate", { id, name }),
+  /** Live model list for one backend. */
   providerModels: (providerId: string) =>
     callOrThrow<ModelInfo[]>("provider_models", { providerId }),
+  /** Every cached model, pinned first, for the models page. */
+  modelCatalog: () => call<ModelEntry[]>("model_catalog"),
+  /** When a backend's list was last fetched. */
+  modelFreshness: (provider: string) => call<string | null>("model_freshness", { provider }),
+  /** Fetches a backend's model list live and caches it. */
+  modelRefresh: (providerId: string) =>
+    callOrThrow<ModelEntry[]>("model_refresh", { providerId }),
+  modelPin: (provider: string, id: string, on: boolean) =>
+    callOrThrow<void>("model_pin", { provider, id, on }),
+  modelSetDefault: (provider: string, id: string) =>
+    callOrThrow<void>("model_set_default", { provider, id }),
+  /** Binds one agent to a backend and model. */
+  agentBind: (agentId: string, provider: string, model: string | null) =>
+    callOrThrow<void>("agent_bind", { agentId, provider, model }),
+
   /** Copies a dropped file into the inbox. */
   ingestFile: (path: string) => callOrThrow<DroppedFile>("ingest_file", { path }),
   /** Only ever tells you whether a key exists — never its value. */
@@ -124,6 +157,8 @@ export const Bridge = {
   sapB1Probe: () => callOrThrow<SapB1Probe>("sap_b1_probe"),
   /** Answers a question about the ERP from the island chat. */
   sapB1Ask: (question: string) => callOrThrow<SapB1Answer>("sap_b1_ask", { question }),
+  /** Clears a pending clarifying turn when the chat leaves the ERP. */
+  sapB1Reset: () => call<void>("sap_b1_reset"),
 
   /** Tray → Pause. Stops the integration pollers, not just the island. */
   setPaused: (paused: boolean) => call<void>("set_paused", { paused }),
@@ -161,6 +196,16 @@ export interface SapB1Answer {
   total: number | null;
   /** True when a row cap cut the data set, so the figure is a lower bound. */
   partial: boolean;
+  /** Which query produced this, so the figure can be trusted or challenged. */
+  source: string;
+  /** Tappable follow-ups. Empty when the question was understood. */
+  suggestions: string[];
+  /** "result" | "clarify" | "answer" | "help" — how the front end renders it. */
+  kind: string;
+  /** The "what I'll do" bubble, shown before a result. */
+  plan: string | null;
+  /** The question the assistant needs answered before it can run. */
+  clarifyingQuestion: string | null;
 }
 
 export interface OpenCodeStatus {
@@ -192,6 +237,47 @@ export interface ProviderInfo {
   keyRequired: boolean;
   /** "anthropic" or "openai" — the API dialect. */
   style: string;
+}
+
+/** A saved backend, as the settings window sees it. */
+export interface ProviderConfigInfo {
+  id: string;
+  name: string;
+  accent: string;
+  style: string;
+  baseUrl: string;
+  defaultModel: string;
+  keyRequired: boolean;
+  builtIn: boolean;
+  /** Computed in Rust so the key never crosses IPC. */
+  hasKey: boolean;
+  keyRef: string;
+  pinnedModels: string[];
+}
+
+/** The read-only catalogue for adding a backend. */
+export interface ProviderPreset {
+  id: string;
+  name: string;
+  accent: string;
+  style: string;
+  baseUrl: string;
+  keyRef: string;
+  defaultModel: string;
+  keyRequired: boolean;
+  note: string;
+}
+
+/** One row of the models table. */
+export interface ModelEntry {
+  id: string;
+  label: string;
+  provider: string;
+  context: number | null;
+  costIn: number | null;
+  costOut: number | null;
+  /** true = known free, false = known paid, null = the source did not say. */
+  free: boolean | null;
 }
 
 export interface ModelInfo {

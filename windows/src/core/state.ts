@@ -1,5 +1,7 @@
 // App state — mirror of AppState.swift (the parts the island needs).
 
+import { Bridge } from "./bridge";
+import type { SapB1Answer } from "./bridge";
 import type { BotEmoteName, BotStateName, IslandMode, IslandViewName } from "./layout";
 import type { EyeShape } from "../mochi/engine";
 
@@ -38,6 +40,10 @@ export interface ChatMessage {
   id: number;
   role: "user" | "assistant";
   content: string;
+  /** When this assistant message is an ERP report, the structured answer. */
+  report?: SapB1Answer;
+  /** When this assistant message is the "what I'll do" plan bubble. */
+  plan?: boolean;
 }
 
 /**
@@ -80,7 +86,7 @@ const task = (
 /** AgentTask.integrationAgents — same ids, names and colours as macOS. */
 export const INTEGRATION_AGENTS: AgentTask[] = [
   task("integration_claude", "VS Code", "#F5F6F8", "claudeCode"),
-  task("integration_sapb1", "SAP B1 Harness", "#0A6ED1", "n8n"),
+  task("integration_sapb1", "SAP Harness", "#0A6ED1", "n8n"),
   task("integration_resend", "Resend", "#22C55E", "n8n"),
   task("integration_n8n", "n8n", "#F29B38", "n8n"),
   task("integration_vercel", "Vercel", "#7C5CFF", "n8n"),
@@ -110,6 +116,27 @@ export interface IntegrationInfo {
   configured: boolean;
 }
 
+export interface ProviderConfig {
+  /** Stable slug; also seeds the keychain key. */
+  id: string;
+  name: string;
+  /** "anthropic" | "openai". */
+  style: string;
+  baseUrl: string;
+  /** Keychain entry name, never the key itself. */
+  keyRef: string;
+  defaultModel: string;
+  keyRequired: boolean;
+  builtIn: boolean;
+  pinnedModels: string[];
+}
+
+export interface AgentBinding {
+  agentId: string;
+  provider: string;
+  model: string;
+}
+
 export interface Settings {
   soundEnabled: boolean;
   soundVolume: number;
@@ -119,12 +146,20 @@ export interface Settings {
   screen: "primary" | "cursor";
   autostart: boolean;
   hooksInstalled: boolean;
-  /** Chat backend: anthropic, openrouter, deepseek or custom. */
+  /** Saved AI backends. */
+  providers: ProviderConfig[];
+  /** Per-agent backend bindings. */
+  agents: AgentBinding[];
+  /** The backend the island chat uses. */
   provider: string;
-  /** Model id for the selected provider. Empty means "use the provider default". */
+  /** Model id for `provider`. Empty means "use the provider default". */
   model: string;
-  /** Base URL for the `custom` OpenAI-compatible provider. */
+  /** Legacy: the custom endpoint. Now `providers[].baseUrl`. */
   customBaseUrl: string;
+  /** Master switch for the pill row. */
+  pillsVisible: boolean;
+  /** Prefixed flags: `pill.<id>`, `integration.<id>`, `feature.<name>`. */
+  features: Record<string, boolean>;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -138,9 +173,13 @@ export const DEFAULT_SETTINGS: Settings = {
   screen: "primary",
   autostart: false,
   hooksInstalled: false,
+  providers: [],
+  agents: [],
   provider: "anthropic",
   model: "claude-opus-5",
   customBaseUrl: "",
+  pillsVisible: true,
+  features: {},
 };
 
 type Listener = () => void;
@@ -173,8 +212,10 @@ class AppState {
   noteMessage: string | null = null;
   searchResult: SearchResult | null = null;
   chatHistory: ChatMessage[] = [];
-  /** When set, the island chat answers into this opencode session. */
+  /** When set, the island chat answers into this opencode session or the ERP. */
   chatTarget: ChatTarget | null = null;
+  /** Tappable follow-ups from the last ERP answer. Empty otherwise. */
+  chatSuggestions: string[] = [];
   pendingApproval: ApprovalInfo | null = null;
 
   integrations: Record<string, IntegrationInfo> = {};
@@ -207,22 +248,89 @@ class AppState {
     return this.tasks.filter((t) => t.id !== this.focusId);
   }
 
+  /** The chat destination a pill implies, or null when it has none of its own.
+   *  Focusing the ERP and then typing must read the ERP: a question about
+   *  "our orders" belongs to the ERP, never to a general chat model. */
+  chatTargetFor(id: string): ChatTarget | null {
+    if (id === "integration_sapb1") return { kind: "sapb1", label: "SAP Harness" };
+    return null;
+  }
+
   setFocus(id: string) {
     const t = this.tasks.find((x) => x.id === id);
     if (!t) return;
     this.focusId = id;
     t.pillBadge = null;
+    // A chat still pointed at the pill we just left would keep answering from it.
+    if (this.chatTarget?.kind === "sapb1" && id !== "integration_sapb1") {
+      this.chatTarget = null;
+      this.chatHistory = [];
+    }
     this.notify();
   }
 
   /** Points the island chat at an opencode session (null clears it). */
   setChatTarget(target: ChatTarget | null) {
     const changed = !sameTarget(this.chatTarget, target);
+    // Leaving the ERP clears any clarifying turn in flight, so a later question
+    // cannot be answered with stale context.
+    if (this.chatTarget?.kind === "sapb1" && target?.kind !== "sapb1") {
+      void Bridge.sapB1Reset();
+    }
     this.chatTarget = target;
+    this.chatSuggestions = [];
     // One log, one destination: answers from the chat provider and answers from
     // an opencode session must not read as one conversation.
     if (changed) this.chatHistory = [];
     this.notify();
+  }
+
+  /** A feature flag. Absent means on, so a new flag never switches itself off. */
+  feature(key: string): boolean {
+    return this.settings.features[key] !== false;
+  }
+
+  /** Whether an integration is switched on. Falls back to the visible-slot list
+   *  for keys a pre-flag build never stored. */
+  integrationOn(id: string): boolean {
+    const stored = this.settings.features[`integration.${id}`];
+    if (stored !== undefined) return stored;
+    return (
+      id === "integration_claude" ||
+      id === "integration_sapb1" ||
+      this.settings.activeIntegrations.includes(id)
+    );
+  }
+
+  /** Whether a pill may appear in the notch. */
+  pillOn(id: string): boolean {
+    return this.settings.pillsVisible && this.feature(`pill.${id}`);
+  }
+
+  /** The saved backend a provider slug maps to, or null. */
+  provider(id: string): ProviderConfig | null {
+    return this.settings.providers.find((p) => p.id === id) ?? null;
+  }
+
+  /** The binding for one agent, falling back to the global chat backend. */
+  bindingFor(agentId: string): { provider: string; model: string } {
+    const b = this.settings.agents.find((a) => a.agentId === agentId);
+    if (b && this.provider(b.provider)) return { provider: b.provider, model: b.model };
+    return { provider: this.settings.provider, model: this.settings.model };
+  }
+
+  /** Switches a feature flag and persists it. */
+  setFeature(key: string, on: boolean) {
+    this.settings.features = { ...this.settings.features, [key]: on };
+    this.notify();
+    void Bridge.saveSettings(this.settings);
+  }
+
+  /** Sets the master pill-row switch and persists it. */
+  setPillsVisible(on: boolean) {
+    this.settings.pillsVisible = on;
+    this.notify();
+    void Bridge.saveSettings(this.settings);
   }
 
   updateTask(id: string, state: BotStateName) {
@@ -248,15 +356,19 @@ class AppState {
     this.notify();
   }
 
-  /** loadIntegrationTasks() — VS Code always on, the rest opt-in (max 4).
-   *  The opencode pill is declared alongside while its plugin is installed. */
+  /** loadIntegrationTasks() — VS Code and SAP always declared, the rest opt-in
+   *  (max 4). The opencode pill is declared alongside while its plugin is
+   *  installed. A pill is shown when its `pill.<id>` flag is on; an integration
+   *  keeps polling only while its `integration.<id>` flag is on — the two are
+   *  independent, so a pill can be hidden without stopping the service. */
   loadIntegrationTasks() {
     for (const proto of INTEGRATION_AGENTS) {
-      // VS Code and the SAP B1 Harness are always declared; the rest opt in.
-      const shouldLoad =
+      const pillOn = this.pillOn(proto.id);
+      const integrationOn =
         proto.id === "integration_claude" ||
         proto.id === "integration_sapb1" ||
-        this.settings.activeIntegrations.includes(proto.id);
+        this.integrationOn(proto.id);
+      const shouldLoad = pillOn && integrationOn;
       const idx = this.tasks.findIndex((t) => t.id === proto.id);
       if (shouldLoad && idx < 0) this.tasks.push({ ...proto, steps: [] });
       if (!shouldLoad && idx >= 0) this.tasks.splice(idx, 1);
@@ -265,8 +377,9 @@ class AppState {
     // opencode: declared while its plugin is installed, so its sessions stay
     // discoverable without pretending to be the Claude Code hook.
     const oidx = this.tasks.findIndex((t) => t.id === OPENCODE_AGENT.id);
-    if (this.opencodeInstalled && oidx < 0) this.tasks.push({ ...OPENCODE_AGENT, steps: [] });
-    if (!this.opencodeInstalled && oidx >= 0) this.tasks.splice(oidx, 1);
+    const opencodeOn = this.opencodeInstalled && this.pillOn(OPENCODE_AGENT.id);
+    if (opencodeOn && oidx < 0) this.tasks.push({ ...OPENCODE_AGENT, steps: [] });
+    if (!opencodeOn && oidx >= 0) this.tasks.splice(oidx, 1);
 
     // Order: integration_claude first, then agent_* pills (visible in slice(0,4)),
     // then other integrations in declaration order.
@@ -285,7 +398,15 @@ class AppState {
       return order.indexOf(a.id) - order.indexOf(b.id);
     });
     if (!this.focusId) this.focusId = "integration_claude";
+    this.syncCompact();
     this.notify();
+  }
+
+  /** The island window shrinks to a single centred pill when no pill row shows.
+   *  The front end knows the real visible pills; Rust just sizes the window. */
+  private syncCompact() {
+    const compact = this.tasks.length === 0 || !this.settings.pillsVisible;
+    void Bridge.setCompact(compact);
   }
 
   removeTask(id: string) {
@@ -320,7 +441,9 @@ class AppState {
       if (active.length >= 4) return;
       this.settings.activeIntegrations = [...active, id];
     }
+    this.settings.features = { ...this.settings.features, [`integration.${id}`]: active.includes(id) };
     this.loadIntegrationTasks();
+    void Bridge.saveSettings(this.settings);
   }
 
   defaultView(): IslandViewName {

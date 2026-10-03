@@ -58,6 +58,9 @@ export const NOTCH_W = 184;
 export const NOTCH_H = 32;
 export const COMPACT_W = 288; // NOTCH_W + 104
 export const EXPANDED_W = 640;
+/// Single-centred-pill panel: the focused card only, used when the pill row is
+/// turned off. Matches COMPACT_W on the Rust side so the island fills the window.
+export const COMPACT_PANEL_W = 340;
 
 export const ROUNDED_CORNER = 14; // hidden / compact
 export const EXPANDED_CORNER = 22;
@@ -94,13 +97,14 @@ export const VIEW_LAYOUTS: Record<IslandViewName, ViewLayout> = {
 
 /** Chat view grows with the conversation — IslandContainer.chatPromptHeight. */
 export function chatPromptHeight(messageCount: number): number {
-  return Math.min(300, 240 + messageCount * 40);
+  return Math.min(500, 260 + messageCount * 36);
 }
 
 export function islandSize(
   mode: IslandMode,
   view: IslandViewName,
   chatCount = 0,
+  compactPanel = false,
 ): { w: number; h: number } {
   switch (mode) {
     case "hidden":
@@ -111,7 +115,8 @@ export function islandSize(
       return { w: COMPACT_W, h: NOTCH_H };
     case "expanded": {
       const h = view === "prompt" ? chatPromptHeight(chatCount) : VIEW_LAYOUTS[view].height;
-      return { w: EXPANDED_W, h };
+      const w = compactPanel && view === "overview" ? COMPACT_PANEL_W : EXPANDED_W;
+      return { w, h };
     }
   }
 }

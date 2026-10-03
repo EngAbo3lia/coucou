@@ -4,7 +4,7 @@
 import { Tracked, Spring, clamp } from "../core/anim";
 import { Bridge, IS_TAURI, onDragDrop } from "../core/bridge";
 import {
-  EXPANDED_CORNER, EXPANDED_W, NOTCH_W, PANEL_H, PANEL_W,
+  COMPACT_PANEL_W, EXPANDED_CORNER, EXPANDED_W, NOTCH_W, PANEL_H, PANEL_W,
   ROUNDED_CORNER, VIEW_LAYOUTS, botGlowColor, botGlowOpacity, botPosition, chatPromptHeight,
   islandSize,
   type IslandMode, type IslandViewName,
@@ -163,7 +163,7 @@ export class Island {
         }
       },
       openErpChat: () => {
-        State.setChatTarget({ kind: "sapb1", label: "SAP B1 Harness" });
+        State.setChatTarget({ kind: "sapb1", label: "SAP Harness" });
         this.setView("prompt");
       },
       openUrl: (url) => {
@@ -346,6 +346,8 @@ export class Island {
     State.view = view;
     State.lastActivity = performance.now();
     this.animateGeometry(!grew);
+    // The chat gets a taller window so a conversation has room to breathe.
+    void Bridge.setChatExpanded(view === "prompt");
     State.notify();
   }
 
@@ -485,7 +487,12 @@ export class Island {
   // ── Geometry ────────────────────────────────────────────────────────────────
 
   private targetSize(): { w: number; h: number; r: number } {
-    const { w, h } = islandSize(State.mode, State.view, State.chatHistory.length);
+    const { w, h } = islandSize(
+      State.mode,
+      State.view,
+      State.chatHistory.length,
+      !State.settings.pillsVisible,
+    );
     const r = State.mode === "expanded" ? EXPANDED_CORNER : ROUNDED_CORNER;
     return { w, h, r };
   }
@@ -519,7 +526,7 @@ export class Island {
     this.greetingCanvas.style.left = `${(w - EXPANDED_W) / 2}px`;
     this.uploadCanvas.el.style.left = `${(w - EXPANDED_W) / 2}px`;
 
-    const rect = { x: (PANEL_W - w) / 2, y: 0, w, h: hh };
+    const rect = { x: (this.baseWidth() - w) / 2, y: 0, w, h: hh };
     const p = this.pushedRect;
     if (Math.abs(p.x - rect.x) > 0.5 || Math.abs(p.w - rect.w) > 0.5 || Math.abs(p.h - rect.h) > 0.5) {
       this.pushedRect = rect;
@@ -527,11 +534,18 @@ export class Island {
     }
   }
 
-  /** Island rect in window coordinates (origin top-left of the 720×320 window). */
+  /** The window the island sits in: 720px normally, 340px in single-pill mode,
+   *  and always 720px in the chat, which grows full-width and tall. */
+  private baseWidth(): number {
+    if (State.view === "prompt") return PANEL_W;
+    return State.settings.pillsVisible ? PANEL_W : COMPACT_PANEL_W;
+  }
+
+  /** Island rect in window coordinates (origin top-left of the window). */
   private islandRect(): { x: number; y: number; w: number; h: number } {
     const w = this.width.value;
     const hh = this.height.value;
-    return { x: (PANEL_W - w) / 2, y: 0, w, h: hh };
+    return { x: (this.baseWidth() - w) / 2, y: 0, w, h: hh };
   }
 
   // ── Window collapse (hidden → tiny wake strip, zero polling) ────────────────

@@ -211,6 +211,8 @@ pub const REPORT_FIELDS: &[(&str, &[&str])] = &[
     ("BusinessPartners", &["CardCode", "CardName", "CardType", "CurrentAccountBalance", "OpenOrdersBalance", "OpenDeliveryNotesBalance", "OpenChecksBalance", "CreditLimit"]),
     ("Items", &["ItemCode", "ItemName", "ItemsGroupCode", "QuantityOnStock", "AvgStdPrice", "MovingAveragePrice", "SalesUnit", "PurchaseUnit"]),
     ("ItemGroups", &["Number", "GroupName"]),
+    // Count-only sets: `$count` works on them, but no report field is validated.
+    ("EmployeesInfo", &[]),
 ];
 
 pub fn report_fields(set: &str) -> Option<&'static [&'static str]> {

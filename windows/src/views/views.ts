@@ -100,7 +100,14 @@ function stack(padLeft: number, padRight: number, ...children: Node[]): HTMLElem
 
 export function buildHeader(actions: ViewActions): ViewHost {
   const tabHome = h("button", { class: "tab", title: "Overview", onclick: () => go("overview") }, svg(ICONS.house, 13));
-  const tabChat = h("button", { class: "tab", title: "Ask", onclick: () => go("prompt") }, svg(ICONS.bubble, 13));
+  // Asking from a pill that has its own backend goes to that backend. With the
+  // ERP focused this must not fall through to the general chat model.
+  const askCurrent = () => {
+    actions.blip();
+    State.setChatTarget(State.chatTargetFor(State.focusId ?? ""));
+    actions.setView("prompt");
+  };
+  const tabChat = h("button", { class: "tab", title: "Ask", onclick: askCurrent }, svg(ICONS.bubble, 13));
   const tabDrop = h("button", { class: "tab", title: "Drop", onclick: () => go("upload") }, svg(ICONS.plus, 13));
 
   const gearBtn = h("button", { title: "Settings", onclick: () => go("settings") }, svg(ICONS.gear, 14));
@@ -148,12 +155,15 @@ function buildOverview(actions: ViewActions): ViewHost {
     svg(ICONS.arrowUpRight, 8),
   );
   const left = card(null, leftBody, jump);
+  // No pill row when the user turned it off: the focused card fills the island,
+  // and the window shrinks to a single centred pill. Never an empty right column.
+  const pillsOn = State.settings.pillsVisible;
   const pills = h("div", { class: "pills" });
   const right = card(null, pills);
 
-  const el = h("div", { class: "view overview" },
+  const el = h("div", { class: `view overview${pillsOn ? "" : " compact"}` },
     h("div", { class: "left" }, left),
-    h("div", { class: "right" }, right),
+    pillsOn ? h("div", { class: "right" }, right) : null,
   );
 
   let pillIds = "";

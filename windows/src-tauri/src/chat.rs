@@ -12,12 +12,34 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::{claude, openai, providers, secrets};
+use crate::{claude, openai, providers, settings::Settings};
 
 const SYSTEM_PROMPT: &str = "You are Mochi, a personal AI assistant living at the top of the user's screen. \
 You have web search access and can help with absolutely anything — research, coding, finding places, recommendations, tasks, questions. \
 Respond in the user's language. Be thorough and complete — use as much detail as the task requires. \
 No markdown formatting (no **, no ##, no bullet dashes). Use plain text with line breaks.";
+
+/// Added only when an ERP is connected. Without it a general model will happily
+/// invent order counts, customer names and stock levels, and even claim it has
+/// no access to the user's ERP while an authenticated Service Layer session sits
+/// in the keychain. A wrong number here costs the user a real business decision,
+/// so the rule is explicit: never state a fact about their data from memory.
+const ERP_PROMPT: &str = "\n\nAn ERP (SAP Business One) is connected for this user. Their orders, \
+invoices, deliveries, business partners, stock and accounting figures live in that ERP and are \
+never in your training data. Never state, estimate or infer a fact about their business data \
+— order counts, invoice totals, customer or vendor names, balances, stock levels. If asked, say \
+that the figures come from their ERP and that the ERP chat reads them live, and name the report \
+it would use. Explaining how SAP B1 works in general is fine; inventing their numbers is not.";
+
+/// The system prompt for one request. `erp_connected` is decided in Rust from the
+/// stored credentials, never by the front end, so it cannot be spoofed.
+fn system_prompt(erp_connected: bool) -> String {
+    if erp_connected {
+        format!("{SYSTEM_PROMPT}{ERP_PROMPT}")
+    } else {
+        SYSTEM_PROMPT.to_string()
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Role {
@@ -41,7 +63,9 @@ struct Turn {
 #[derive(Default)]
 pub struct Chat {
     turns: Mutex<Vec<Turn>>,
-    /// Provider the stored history was built for.
+    /// `provider\u{1f}model` the stored history was built for. A model change
+    /// clears the history too: an Anthropic raw block is not valid in an
+    /// OpenAI payload, and silently dropping turns reads as amnesia.
     provider: Mutex<Option<String>>,
 }
 
@@ -55,11 +79,12 @@ impl Chat {
         self.turns.lock().unwrap().is_empty()
     }
 
-    fn switch_provider_if_needed(&self, id: &str) {
+    fn switch_backend_if_needed(&self, id: &str, model: &str) {
+        let signature = format!("{id}\u{1f}{model}");
         let mut current = self.provider.lock().unwrap();
-        if current.as_deref() != Some(id) {
+        if current.as_deref() != Some(signature.as_str()) {
             self.turns.lock().unwrap().clear();
-            *current = Some(id.to_string());
+            *current = Some(signature);
         }
     }
 
@@ -93,28 +118,28 @@ pub struct ChatReply {
 /// in the note view.
 pub async fn send(
     chat: &Chat,
+    settings: &Settings,
     provider_id: &str,
     model: &str,
-    custom_base_url: &str,
     query: String,
     context: Option<ChatContext>,
+    erp_connected: bool,
 ) -> Result<ChatReply, String> {
-    let provider = providers::resolve(provider_id);
-    chat.switch_provider_if_needed(provider.id);
+    let provider = providers::resolve(settings, provider_id);
 
-    let key = secrets::get(provider.key).filter(|k| !k.is_empty());
-    if provider.needs_key() && key.is_none() {
-        return Err(format!("{} API key missing. Open settings.", provider.name));
+    if provider.needs_key() && provider.key.is_empty() {
+        return Err(format!("{} API key missing. Open Settings → Models.", provider.name));
     }
 
     let model = if model.trim().is_empty() {
-        provider.default_model.to_string()
+        provider.default_model.clone()
     } else {
         model.trim().to_string()
     };
     if model.is_empty() {
         return Err("Pick a model in Settings first.".into());
     }
+    chat.switch_backend_if_needed(&provider.id, &model);
 
     let turn = Turn {
         role: Role::User,
@@ -124,12 +149,14 @@ pub async fn send(
     };
     chat.push(turn);
 
+    let prompt = system_prompt(erp_connected);
+    let key = Some(provider.key.clone()).filter(|k| !k.is_empty());
     let result = match provider.style {
         providers::ApiStyle::Anthropic => {
-            send_anthropic(chat, provider, &key, &model).await
+            send_anthropic(chat, &provider, &key, &model, &prompt).await
         }
         providers::ApiStyle::OpenAICompatible => {
-            send_openai(chat, provider, &key, &model, custom_base_url).await
+            send_openai(chat, &provider, &key, &model, &prompt).await
         }
     };
 
@@ -143,19 +170,17 @@ pub async fn send(
 
 async fn send_anthropic(
     chat: &Chat,
-    provider: &providers::Provider,
+    provider: &providers::Resolved,
     key: &Option<String>,
     model: &str,
+    system: &str,
 ) -> Result<String, String> {
-    let key = key.as_deref().ok_or("Anthropic API key missing. Open settings.")?;
-    let reply = claude::chat(
-        &provider.base_url_from(""),
-        model,
-        key,
-        SYSTEM_PROMPT,
-        &anthropic_messages(&chat.snapshot()),
-    )
-    .await?;
+    let key = key.as_deref().ok_or("Anthropic API key missing. Open Settings → Models.")?;
+    if provider.base().is_empty() {
+        return Err("Set the endpoint URL for Anthropic first.".into());
+    }
+    let reply = claude::chat(provider.base(), model, key, system, &anthropic_messages(&chat.snapshot()))
+        .await?;
 
     // Store the whole content — tool_use / tool_result blocks included — so the
     // next turn has the right context.
@@ -209,12 +234,12 @@ fn anthropic_messages(turns: &[Turn]) -> Vec<Value> {
 
 async fn send_openai(
     chat: &Chat,
-    provider: &providers::Provider,
+    provider: &providers::Resolved,
     key: &Option<String>,
     model: &str,
-    custom_base_url: &str,
+    system: &str,
 ) -> Result<String, String> {
-    let mut messages = vec![json!({ "role": "system", "content": SYSTEM_PROMPT })];
+    let mut messages = vec![json!({ "role": "system", "content": system })];
     for turn in chat.snapshot() {
         match turn.role {
             Role::User => messages.push(json!({
@@ -228,11 +253,11 @@ async fn send_openai(
         }
     }
 
-    let base_url = provider.base_url_from(custom_base_url);
+    let base_url = provider.base();
     if base_url.is_empty() {
         return Err("Set the endpoint URL in Settings first.".into());
     }
-    let text = openai::chat(&base_url, key.as_deref(), model, &messages).await?;
+    let text = openai::chat(base_url, key.as_deref(), model, &messages).await?;
     chat.push(Turn {
         role: Role::Assistant,
         text: text.clone(),
@@ -272,25 +297,37 @@ fn openai_user_content(turn: &Turn) -> Value {
 }
 
 /// Model list for the Settings picker. Works for Anthropic and every
-/// OpenAI-compatible provider; returns `{id, label}` objects.
-pub async fn list_models(provider_id: &str, custom_base_url: &str) -> Result<Vec<Value>, String> {
-    let provider = providers::resolve(provider_id);
-    let key = secrets::get(provider.key).filter(|k| !k.is_empty());
-
+/// OpenAI-compatible backend; returns the raw endpoint shape (`{id, …}` objects).
+pub async fn list_models(settings: &Settings, provider_id: &str) -> Result<Vec<Value>, String> {
+    let provider = providers::resolve(settings, provider_id);
+    if provider.needs_key() && provider.key.is_empty() {
+        return Err("No API key — add it in Settings.".into());
+    }
+    if provider.base().is_empty() {
+        return Err("Set the endpoint URL in Settings first.".into());
+    }
     match provider.style {
-        providers::ApiStyle::Anthropic => {
-            let key = key.ok_or("No API key — add it in Settings.")?;
-            claude::models(&provider.base_url_from(""), &key).await
-        }
+        providers::ApiStyle::Anthropic => claude::models(provider.base(), &provider.key).await,
         providers::ApiStyle::OpenAICompatible => {
-            if provider.needs_key() && key.is_none() {
-                return Err("No API key — add it in Settings.".into());
-            }
-            let base_url = provider.base_url_from(custom_base_url);
-            if base_url.is_empty() {
-                return Err("Set the endpoint URL in Settings first.".into());
-            }
-            openai::models(&base_url, key.as_deref()).await
+            openai::models(provider.base(), Some(provider.key.as_str())).await
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_erp_rule_only_appears_with_an_erp() {
+        assert!(!system_prompt(false).contains("ERP"));
+        assert!(system_prompt(true).contains("SAP Business One"));
+        assert!(system_prompt(true).contains("Never state"));
+    }
+
+    #[test]
+    fn the_base_prompt_still_allows_general_help() {
+        // "How do I create an order in SAP B1" must still be answerable.
+        assert!(system_prompt(true).contains("Explaining how SAP B1 works in general is fine"));
     }
 }

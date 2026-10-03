@@ -1157,6 +1157,38 @@ input[type="range"]::-webkit-slider-thumb {
   min-width: 0;
 }
 
+/* SAP B1 Harness: the pill configures the ERP itself, so it needs one input
+   row per credential — label, field, save, stored-dot. */
+.int-row.sap-row {
+  gap: 6px;
+  padding: 2px 0;
+}
+
+.sap-label {
+  flex: 0 0 104px;
+  font: 400 10.5px var(--font);
+  color: var(--dim-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sap-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 3px 7px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--bg-2);
+  color: var(--text);
+  font: 400 11px var(--font);
+  outline: none;
+}
+
+.sap-input:focus {
+  border-color: var(--accent);
+}
+
 .int-row.first .int-name {
   color: #c5c8cd;
 }

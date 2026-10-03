@@ -40,11 +40,19 @@ export interface ChatMessage {
   content: string;
 }
 
-/** An opencode session the island chat is currently talking to. */
-export interface ChatTarget {
-  sessionId: string;
-  directory: string;
-  label: string;
+/**
+ * Where the island chat sends a message when it is not talking to the plain
+ * chat provider: an opencode session, or the ERP.
+ */
+export type ChatTarget =
+  | { kind: "opencode"; sessionId: string; directory: string; label: string }
+  | { kind: "sapb1"; label: string };
+
+/** Two targets are the same when they point at the same place. */
+function sameTarget(a: ChatTarget | null, b: ChatTarget | null): boolean {
+  if (!a || !b) return a === b;
+  if (a.kind !== b.kind) return false;
+  return a.kind === "sapb1" || a.sessionId === (b as { sessionId: string }).sessionId;
 }
 
 export type PromptContext =
@@ -72,6 +80,7 @@ const task = (
 /** AgentTask.integrationAgents — same ids, names and colours as macOS. */
 export const INTEGRATION_AGENTS: AgentTask[] = [
   task("integration_claude", "VS Code", "#F5F6F8", "claudeCode"),
+  task("integration_sapb1", "SAP B1 Harness", "#0A6ED1", "n8n"),
   task("integration_resend", "Resend", "#22C55E", "n8n"),
   task("integration_n8n", "n8n", "#F29B38", "n8n"),
   task("integration_vercel", "Vercel", "#7C5CFF", "n8n"),
@@ -84,7 +93,7 @@ export const INTEGRATION_AGENTS: AgentTask[] = [
 /** The opencode pill. Declared while its plugin is installed, so the island
  *  shows opencode instead of the unused Claude Code hook. */
 export const OPENCODE_AGENT: AgentTask = {
-  id: "agent_opencode", name: "opencode", color: "#8B5CF6",
+  id: "agent_opencode", name: "Opencode", color: "#8B5CF6",
   state: "idle", stepIndex: 0, steps: [], source: "agent", isIntegration: true,
 };
 
@@ -208,7 +217,7 @@ class AppState {
 
   /** Points the island chat at an opencode session (null clears it). */
   setChatTarget(target: ChatTarget | null) {
-    const changed = this.chatTarget?.sessionId !== target?.sessionId;
+    const changed = !sameTarget(this.chatTarget, target);
     this.chatTarget = target;
     // One log, one destination: answers from the chat provider and answers from
     // an opencode session must not read as one conversation.
@@ -243,8 +252,11 @@ class AppState {
    *  The opencode pill is declared alongside while its plugin is installed. */
   loadIntegrationTasks() {
     for (const proto of INTEGRATION_AGENTS) {
+      // VS Code and the SAP B1 Harness are always declared; the rest opt in.
       const shouldLoad =
-        proto.id === "integration_claude" || this.settings.activeIntegrations.includes(proto.id);
+        proto.id === "integration_claude" ||
+        proto.id === "integration_sapb1" ||
+        this.settings.activeIntegrations.includes(proto.id);
       const idx = this.tasks.findIndex((t) => t.id === proto.id);
       if (shouldLoad && idx < 0) this.tasks.push({ ...proto, steps: [] });
       if (!shouldLoad && idx >= 0) this.tasks.splice(idx, 1);

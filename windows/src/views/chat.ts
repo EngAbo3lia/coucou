@@ -88,12 +88,16 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
       State.chatHistory.length === 1 && file ? { kind: "file", name: file.name, path: file.path } : null;
 
     try {
-      // A session target means "answer inside that opencode session", not
-      // Coucou's own chat provider. Same input box, different destination.
+      // A target means the message goes somewhere other than Coucou's own chat
+      // provider — into an opencode session, or into the ERP. Same input box,
+      // three destinations.
       const target = State.chatTarget;
-      const reply = target
-        ? await Bridge.opencodeRun(target.sessionId, target.directory, query)
-        : (await Bridge.chatSend(query, context)).text;
+      const reply =
+        target?.kind === "opencode"
+          ? await Bridge.opencodeRun(target.sessionId, target.directory, query)
+          : target?.kind === "sapb1"
+            ? (await Bridge.sapB1Ask(query)).text
+            : (await Bridge.chatSend(query, context)).text;
       State.chatHistory.push({ id: nextId++, role: "assistant", content: reply });
       State.stateOverride = null;
       Sound.play("finish");
@@ -124,7 +128,11 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
     sync() {
       const file = State.droppedFile;
       const target = State.chatTarget;
-      const wantChip = target ? `opencode · ${target.label}` : file?.name ?? "";
+      const wantChip = target
+        ? target.kind === "opencode"
+          ? `opencode · ${target.label}`
+          : `SAP B1 · ${target.label}`
+        : file?.name ?? "";
       const kind = target ? "session" : file?.name ? "file" : "";
       if (chipRow.dataset.label !== wantChip || chipRow.dataset.kind !== kind) {
         chipRow.dataset.label = wantChip;
@@ -145,7 +153,9 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
       }
 
       input.placeholder = target
-        ? "Message this opencode session…"
+        ? target.kind === "opencode"
+          ? "Message this opencode session…"
+          : "Ask the ERP…"
         : State.chatHistory.length === 0
           ? "Ask me anything…"
           : "Continue…";

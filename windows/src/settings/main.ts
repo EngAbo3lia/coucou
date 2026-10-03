@@ -479,8 +479,13 @@ interface IntegrationDef {
   color: string;
   /** Credential Manager keys, in the order they are shown. */
   fields: { key: string; label: string; placeholder: string; secret: boolean }[];
+  /** No pill switch: the row is controlled elsewhere (a plugin, a probe). */
+  noSwitch?: boolean;
 }
 
+// The SAP B1 Harness configures itself inside its own pill, so it has no row
+// here: the company database is not a public service and its credentials never
+// belong in a list of API keys.
 const INTEGRATIONS: IntegrationDef[] = [
   { id: "integration_stripe", name: "Stripe", color: "#0570DE",
     fields: [{ key: "stripe-api-key", label: "Secret key", placeholder: "sk_live_…", secret: true }] },
@@ -533,7 +538,7 @@ function integrationsSection(
       { style: "display:flex;align-items:center;gap:8px;min-width:132px;padding-top:4px" },
       statusDot(opencode.installed),
       h("i", { class: "dot", style: "background:#8B5CF6" }),
-      h("span", { style: "font-size:12.5px", text: "opencode" }),
+      h("span", { style: "font-size:12.5px", text: "Opencode" }),
     );
     agentHost.append(
       h(
@@ -565,6 +570,7 @@ function integrationsSection(
       updateNote();
       void save();
     });
+    const configured = def.fields.every((f) => present[f.key]);
 
     const rows = h("div", { style: "display:flex;flex-direction:column;gap:6px;flex:1 1 auto;min-width:0" });
     for (const field of def.fields) {
@@ -597,10 +603,10 @@ function integrationsSection(
       );
     }
 
-    list.append(
+list.append(
       h("div", { style: "display:flex;gap:12px;align-items:flex-start" },
         h("div", { style: "display:flex;align-items:center;gap:8px;min-width:132px;padding-top:4px" },
-          sw,
+          def.noSwitch ? statusDot(configured) : sw,
           h("i", { class: "dot", style: `background:${def.color}` }),
           h("span", { style: "font-size:12.5px", text: def.name }),
         ),
@@ -693,6 +699,7 @@ async function main() {
     "anthropic-api-key", "openrouter-api-key", "deepseek-api-key", "custom-api-key",
     "stripe-api-key", "github-token", "vercel-token",
     "n8n-url", "n8n-api-key", "resend-api-key", "notion-api-key", "calcom-api-key",
+    "sapb1-url", "sapb1-company", "sapb1-user", "sapb1-password",
   ];
   const present: Record<string, boolean> = {};
   for (const k of keys) present[k] = (await Bridge.secretPresent(k)) ?? false;

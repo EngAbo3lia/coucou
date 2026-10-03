@@ -12,6 +12,7 @@ mod opencode;
 mod pipe;
 mod platform;
 mod providers;
+mod sapb1;
 mod secrets;
 mod settings;
 mod tray;
@@ -359,6 +360,21 @@ async fn refresh_integration(app: AppHandle, id: String) {
     integrations::poll_once(app, &id).await;
 }
 
+// ── SAP Business One ──────────────────────────────────────────────────────────
+
+/// Connects to Business One and reports which report entity sets and fields the
+/// live server actually has. Credentials come from the Credential Manager.
+#[tauri::command]
+async fn sap_b1_probe() -> Result<sapb1::Probe, String> {
+    sapb1::probe(&sapb1::credentials_from_secrets()?).await
+}
+
+/// Answers a question about the ERP from the island chat.
+#[tauri::command]
+async fn sap_b1_ask(question: String) -> Result<sapb1::Answer, String> {
+    sapb1::ask::ask(&sapb1::credentials_from_secrets()?, &question).await
+}
+
 /// Lets the island write to the same log as the Rust side.
 #[tauri::command]
 fn log_line(message: String) {
@@ -480,6 +496,8 @@ pub fn run() {
             secret_clear,
             refresh_integration,
             open_n8n,
+            sap_b1_probe,
+            sap_b1_ask,
             open_settings_window,
             set_paused,
         ])

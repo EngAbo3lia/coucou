@@ -6,8 +6,8 @@
 
 import { h, svg, clear, dot } from "./dom";
 import { ICONS } from "./icons";
-import { State, type AgentTask } from "../core/state";
-import { Bridge, type OpencodeSession } from "../core/bridge";
+import { State, type AgentTask, type IntegrationInfo } from "../core/state";
+import { Bridge, type OpencodeSession, type SapB1Probe } from "../core/bridge";
 
 /** Same shape as the Swift `timeAgo` computed properties. */
 export function timeAgo(value: unknown): string {
@@ -519,6 +519,153 @@ function n8nDetail(task: AgentTask, onBack: () => void): HTMLElement {
   );
 }
 
+// ── SAP B1 Harness ────────────────────────────────────────────────────────────
+//
+// The one card that configures itself: the ERP is a company database, not a
+// public service, so its credentials live here in the pill instead of a
+// Settings row. Passwords go straight to the Credential Manager and are never
+// read back — only presence is ever known.
+
+const SAP_FIELDS: { key: string; label: string; placeholder: string; secret: boolean }[] = [
+  { key: "sapb1-url", label: "Service Layer URL", placeholder: "https://host:50000", secret: false },
+  { key: "sapb1-company", label: "Company DB", placeholder: "TESTING01", secret: false },
+  { key: "sapb1-user", label: "User", placeholder: "manager", secret: false },
+  { key: "sapb1-password", label: "Password", placeholder: "…", secret: true },
+];
+
+/** Which SAP keys exist, fetched once: values are never readable. */
+let sapKeys: Record<string, boolean> | null = null;
+let sapKeysLoading = false;
+/** Guards against two clicks both starting a login. */
+let sapProbing = false;
+
+async function loadSapKeys() {
+  if (sapKeys || sapKeysLoading) return;
+  sapKeysLoading = true;
+  try {
+    const found = await Promise.all(
+      SAP_FIELDS.map(async (f) => [f.key, (await Bridge.secretPresent(f.key)) === true] as const),
+    );
+    sapKeys = Object.fromEntries(found);
+  } finally {
+    sapKeysLoading = false;
+    State.notify();
+  }
+}
+
+/** Writes the card's slice of integration state and repaints. */
+function setSapState(id: string, patch: Partial<IntegrationInfo>) {
+  const info = State.integrations[id] ?? { data: {}, error: null, loaded: false, configured: false };
+  State.integrations[id] = { ...info, ...patch };
+  State.notify();
+}
+
+export function sapB1Card(task: AgentTask, hooks: IntegrationCardHooks): HTMLElement {
+  const info = State.integrations[task.id];
+  const probe = (info?.data as { probe?: SapB1Probe } | undefined)?.probe ?? null;
+  if (!sapKeys) void loadSapKeys();
+
+  const stored = (key: string) => sapKeys?.[key] === true;
+  const missing = sapKeys ? SAP_FIELDS.filter((f) => !stored(f.key)) : [];
+  const complete = sapKeys !== null && missing.length === 0;
+
+  const label = info?.error
+    ?? (probe
+      ? probe.ready
+        ? `Connected · ${probe.entitySetCount} entity sets · all report fields present`
+        : `Connected · missing ${probe.sets.filter((s) => !s.present || s.missingFields.length > 0).map((s) => s.entitySet).join(", ")}`
+      : sapProbing
+        ? "Connecting…"
+        : complete
+          ? "Credentials stored · not tested yet"
+          : sapKeys
+            ? `Missing: ${missing.map((f) => f.label).join(", ")}`
+            : "Checking credentials…");
+  const statusColor = info?.error ? "#F4505E"
+    : probe?.ready ? "#22C55E"
+    : complete ? "#f5a524"
+    : "#F4505E";
+
+  const rows: Node[] = [];
+  for (const field of SAP_FIELDS) {
+    const input = h("input", {
+      class: "sap-input",
+      type: field.secret ? "password" : "text",
+      placeholder: stored(field.key) ? "••••••••  (stored)" : field.placeholder,
+      autocomplete: "off",
+      spellcheck: false,
+    }) as HTMLInputElement;
+
+    const mark = dot(stored(field.key) ? "#22C55E" : "#8e939c", 5);
+    const save = h("button", { class: "link-btn", text: "Save" });
+    save.addEventListener("click", () => void (async () => {
+      const value = input.value.trim();
+      if (!value) return;
+      save.textContent = "Saving…";
+      try {
+        await Bridge.secretSet(field.key, value);
+        input.value = "";
+        // A new credential invalidates the old probe result.
+        sapKeys = { ...(sapKeys ?? {}), [field.key]: true };
+        setSapState(task.id, { data: {}, error: null, loaded: false, configured: completeAfterSave() });
+      } catch (err) {
+        setSapState(task.id, { error: String(err).replace(/^Error:\s*/, "") });
+      }
+      save.textContent = "Save";
+    })());
+
+    rows.push(
+      h("div", { class: "int-row sap-row" },
+        h("span", { class: "sap-label", text: field.label }),
+        input,
+        save,
+        mark,
+      ),
+    );
+  }
+
+  function completeAfterSave() {
+    const next = { ...(sapKeys ?? {}) };
+    return SAP_FIELDS.every((f) => next[f.key] === true);
+  }
+
+  const actions = h("div", { class: "int-actions" });
+  const test = h("button", { class: "link-btn", style: `color:${task.color}d9`, text: "Test connection" });
+  const chat = h("button", {
+    class: "link-btn",
+    style: `color:${probe?.ready ? `${task.color}d9` : "#8e939c"}`,
+    text: "Ask the ERP…",
+  });
+  chat.addEventListener("click", () => {
+    if (probe?.ready) hooks.chatWithErp();
+  });
+  actions.append(test, chat);
+
+  test.addEventListener("click", () => void (async () => {
+    if (sapProbing) return;
+    sapProbing = true;
+    setSapState(task.id, { error: null });
+    try {
+      const result = await Bridge.sapB1Probe();
+      setSapState(task.id, { data: { probe: result }, error: null, loaded: true, configured: true });
+    } catch (err) {
+      setSapState(task.id, { error: String(err).replace(/^Error:\s*/, "") });
+    } finally {
+      sapProbing = false;
+      State.notify();
+    }
+  })());
+
+  return h(
+    "div",
+    { class: "int-card" },
+    header(task.color, task.name, "ERP"),
+    h("div", { class: "int-status" }, dot(statusColor, 5), h("span", { text: label })),
+    ...rows,
+    actions,
+  );
+}
+
 // ── Dispatch ──────────────────────────────────────────────────────────────────
 
 export interface IntegrationCardHooks {
@@ -530,6 +677,8 @@ export interface IntegrationCardHooks {
   continueInChat(session: { id: string; directory: string; title: string }): void;
   /** Continue a session in opencode's own window. */
   continueInOpencode(session: { id: string; directory: string; title: string }): void;
+  /** Point the island chat at the ERP. */
+  chatWithErp(): void;
 }
 
 /** True when this integration has data worth showing instead of the idle card. */
@@ -557,6 +706,9 @@ export function hasIntegrationData(id: string): boolean {
 export function renderIntegrationCard(task: AgentTask, hooks: IntegrationCardHooks): HTMLElement {
   if (task.id === "agent_opencode") {
     return opencodeCard(task, hooks);
+  }
+  if (task.id === "integration_sapb1") {
+    return sapB1Card(task, hooks);
   }
   if (task.id === "integration_n8n") {
     const hasActivity = task.steps.length > 0 && (task.state === "finished" || task.state === "error");

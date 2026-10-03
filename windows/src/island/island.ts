@@ -158,9 +158,13 @@ export class Island {
         if (mode === "chat") {
           State.setChatTarget(session);
           this.setView("prompt");
-        } else {
+        } else if (session.kind === "opencode") {
           void Bridge.opencodeContinue(session.sessionId, session.directory);
         }
+      },
+      openErpChat: () => {
+        State.setChatTarget({ kind: "sapb1", label: "SAP B1 Harness" });
+        this.setView("prompt");
       },
       openUrl: (url) => {
         if (url) void Bridge.openUrl(url);

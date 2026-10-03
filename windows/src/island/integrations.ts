@@ -15,7 +15,12 @@ const KEY_FOR: Record<string, string> = {
   integration_n8n: "n8n-api-key",
   integration_resend: "resend-api-key",
   integration_notion: "notion-api-key",
-  integration_calcom: "calcom-api-key",
+  integration_calcom: "calcom-token",
+};
+
+/** Pills that only count as configured when every one of their keys exists. */
+const KEYS_FOR: Record<string, string[]> = {
+  integration_sapb1: ["sapb1-url", "sapb1-company", "sapb1-user", "sapb1-password"],
 };
 
 const clearTimers = new Map<string, number>();
@@ -28,9 +33,11 @@ export function registerIntegrationHandlers(island: Island) {
 /** Asks Rust which keys exist so the idle cards can say so. */
 export async function refreshConfigured() {
   for (const [id, key] of Object.entries(KEY_FOR)) {
-    const present = (await Bridge.secretPresent(key)) ?? false;
-    const info = State.integrations[id] ?? { data: {}, error: null, loaded: false, configured: false };
-    State.integrations[id] = { ...info, configured: present };
+    await markConfigured(id, [await Bridge.secretPresent(key)]);
+  }
+  for (const [id, keys] of Object.entries(KEYS_FOR)) {
+    const present = await Promise.all(keys.map((k) => Bridge.secretPresent(k)));
+    await markConfigured(id, present);
   }
   const hooks = State.settings.hooksInstalled;
   const claude = State.integrations.integration_claude ?? {
@@ -39,6 +46,15 @@ export async function refreshConfigured() {
   State.integrations.integration_claude = { ...claude, configured: hooks };
 
   State.notify();
+}
+
+/** Configured only when every one of the pill's keys is present. */
+async function markConfigured(id: string, present: (boolean | null)[]) {
+  const info = State.integrations[id] ?? { data: {}, error: null, loaded: false, configured: false };
+  State.integrations[id] = {
+    ...info,
+    configured: present.length > 0 && present.every((p) => p === true),
+  };
 }
 
 function handle(island: Island, update: IntegrationUpdate) {

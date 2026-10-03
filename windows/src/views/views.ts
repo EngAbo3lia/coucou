@@ -21,6 +21,8 @@ export interface ViewActions {
   openTarget(): void;
   /** Continue an opencode session: in the island chat, or in a terminal. */
   continueSession(session: ChatTarget, mode: "chat" | "opencode"): void;
+  /** Point the island chat at the ERP. */
+  openErpChat(): void;
   openUrl(url: string): void;
   decide(d: "allow" | "deny"): void;
   toggleSound(): void;
@@ -176,9 +178,16 @@ function buildOverview(actions: ViewActions): ViewHost {
     },
     openSettings: () => actions.openSettingsWindow(),
     continueInChat: (s) =>
-      actions.continueSession({ sessionId: s.id, directory: s.directory, label: s.title }, "chat"),
+      actions.continueSession(
+        { kind: "opencode", sessionId: s.id, directory: s.directory, label: s.title },
+        "chat",
+      ),
     continueInOpencode: (s) =>
-      actions.continueSession({ sessionId: s.id, directory: s.directory, label: s.title }, "opencode"),
+      actions.continueSession(
+        { kind: "opencode", sessionId: s.id, directory: s.directory, label: s.title },
+        "opencode",
+      ),
+    chatWithErp: () => actions.openErpChat(),
   };
 
   return {
@@ -394,7 +403,7 @@ function buildFinished(actions: ViewActions): ViewHost {
   const sessionTarget = (): ChatTarget | null => {
     const task = State.focusTask;
     if (!task?.sessionId) return null;
-    return { sessionId: task.sessionId, directory: task.sessionCwd ?? "", label: task.name };
+    return { kind: "opencode", sessionId: task.sessionId, directory: task.sessionCwd ?? "", label: task.name };
   };
   const chatBtn = btn("Continue: Chat", "primary", () => {
     const s = sessionTarget();

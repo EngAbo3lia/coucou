@@ -117,10 +117,51 @@ export const Bridge = {
   refreshIntegration: (id: string) => call<void>("refresh_integration", { id }),
   /** Opens the configured n8n instance in the browser. */
   openN8n: () => call<void>("open_n8n"),
+  /**
+   * Connects to SAP Business One and reports which report entity sets and
+   * fields the live server has. Credentials live in the Credential Manager.
+   */
+  sapB1Probe: () => callOrThrow<SapB1Probe>("sap_b1_probe"),
+  /** Answers a question about the ERP from the island chat. */
+  sapB1Ask: (question: string) => callOrThrow<SapB1Answer>("sap_b1_ask", { question }),
 
   /** Tray → Pause. Stops the integration pollers, not just the island. */
   setPaused: (paused: boolean) => call<void>("set_paused", { paused }),
 };
+
+/** One report entity set, checked against the live Service Layer. */
+export interface SapB1SetProbe {
+  entitySet: string;
+  present: boolean;
+  entityType: string | null;
+  fieldCount: number;
+  /** Report fields the server does not have. Empty is the good case. */
+  missingFields: string[];
+}
+
+export interface SapB1Probe {
+  entitySetCount: number;
+  typeCount: number;
+  sets: SapB1SetProbe[];
+  /** True when every report set and every report field exists live. */
+  ready: boolean;
+}
+
+export interface SapB1AnswerRow {
+  label: string;
+  value: number;
+}
+
+/** The ERP's answer to a chat question. */
+export interface SapB1Answer {
+  title: string;
+  /** A readable block, ready for the chat log. */
+  text: string;
+  rows: SapB1AnswerRow[];
+  total: number | null;
+  /** True when a row cap cut the data set, so the figure is a lower bound. */
+  partial: boolean;
+}
 
 export interface OpenCodeStatus {
   installed: boolean;

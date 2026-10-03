@@ -106,6 +106,9 @@ pub struct Settings {
     // ── Presentation ─────────────────────────────────────────────────────────
     /// Master switch for the pill row. Off means a compact, pill-free island.
     pub pills_visible: bool,
+    /// The pill focused on launch. Empty means "decide at runtime": SAP Harness
+    /// when it is configured, else the first enabled agent.
+    pub default_agent: String,
     /// Prefixed feature flags: `pill.<id>`, `integration.<id>`, `feature.<name>`.
     /// Every absent key is on, so this map only ever stores deliberate choices.
     pub features: BTreeMap<String, bool>,
@@ -145,6 +148,7 @@ impl Default for Settings {
             model: default_model(),
             custom_base_url: String::new(),
             pills_visible: true,
+            default_agent: String::new(),
             features: BTreeMap::new(),
         }
     }

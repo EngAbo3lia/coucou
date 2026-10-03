@@ -611,20 +611,18 @@ async fn sap_b1_probe() -> Result<sapb1::Probe, String> {
     sapb1::probe(&sapb1::credentials_from_secrets()?).await
 }
 
-/// Answers a question about the ERP from the island chat. The planner reads the
-/// SAP agent's backend binding from settings, so it answers conversationally
-/// until the user asks for a figure.
+/// Answers a question about the ERP from the island chat. `history` is the
+/// conversation so far, so the planner stays aware and does not re-ask. The
+/// planner reads the SAP agent's backend binding from settings.
 #[tauri::command]
-async fn sap_b1_ask(shared: State<'_, Shared>, question: String) -> Result<sapb1::Answer, String> {
+async fn sap_b1_ask(
+    shared: State<'_, Shared>,
+    question: String,
+    history: Option<Vec<sapb1::planner::ChatTurn>>,
+) -> Result<sapb1::Answer, String> {
     let settings = shared.settings.lock().unwrap().clone();
-    sapb1::ask::ask(&sapb1::credentials_from_secrets()?, &settings, &question).await
-}
-
-/// Clears a pending clarifying turn — called when the chat leaves the ERP or the
-/// island closes, so stale context cannot answer a later question.
-#[tauri::command]
-fn sap_b1_reset() {
-    sapb1::ask::clear_pending();
+    let history = history.unwrap_or_default();
+    sapb1::ask::ask(&sapb1::credentials_from_secrets()?, &settings, &question, &history).await
 }
 
 /// Lets the island write to the same log as the Rust side.
@@ -771,7 +769,6 @@ pub fn run() {
             open_n8n,
             sap_b1_probe,
             sap_b1_ask,
-            sap_b1_reset,
             open_settings_window,
             set_paused,
         ])

@@ -76,18 +76,20 @@ pub async fn chat(
 
 /// One deterministic turn: no web-search tool, no fallback banner. Used where
 /// the model must answer a fixed prompt (the ERP planner), not browse.
+/// `messages` is already in Anthropic's `{role, content}` shape, so the planner
+/// can hand over the whole conversation and the model stays aware of it.
 pub async fn chat_plain(
     base_url: &str,
     model: &str,
     key: &str,
     system: &str,
-    user: &str,
+    messages: &[Value],
 ) -> Result<String, String> {
     let body = json!({
         "model": model,
         "max_tokens": MAX_TOKENS,
         "system": system,
-        "messages": [{ "role": "user", "content": user }],
+        "messages": messages,
     });
     let response = call(base_url, key, &body).await?;
     let Some(blocks) = response.get("content").and_then(Value::as_array).cloned() else {

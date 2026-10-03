@@ -217,6 +217,23 @@ section.group h3 {
 .dialog .row { margin-top: 12px; }
 .dialog .row > label { min-width: 84px; }
 
+/* "Make default" marker on an agent. */
+.toggle-pill {
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--hairline);
+  background: none;
+  color: var(--dim);
+  font: 500 12px var(--font);
+  cursor: pointer;
+}
+
+.toggle-pill.on {
+  border-color: rgba(34, 197, 94, 0.45);
+  background: rgba(34, 197, 94, 0.12);
+  color: var(--green);
+}
+
 h1 {
   font: 600 17px var(--font);
   letter-spacing: -0.01em;

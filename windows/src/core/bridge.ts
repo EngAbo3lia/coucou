@@ -155,10 +155,10 @@ export const Bridge = {
    * fields the live server has. Credentials live in the Credential Manager.
    */
   sapB1Probe: () => callOrThrow<SapB1Probe>("sap_b1_probe"),
-  /** Answers a question about the ERP from the island chat. */
-  sapB1Ask: (question: string) => callOrThrow<SapB1Answer>("sap_b1_ask", { question }),
-  /** Clears a pending clarifying turn when the chat leaves the ERP. */
-  sapB1Reset: () => call<void>("sap_b1_reset"),
+  /** Answers a question about the ERP from the island chat. `history` is the
+   *  conversation so far, so the planner stays aware and does not re-ask. */
+  sapB1Ask: (question: string, history: ChatTurn[]) =>
+    callOrThrow<SapB1Answer>("sap_b1_ask", { question, history }),
 
   /** Tray → Pause. Stops the integration pollers, not just the island. */
   setPaused: (paused: boolean) => call<void>("set_paused", { paused }),
@@ -185,6 +185,12 @@ export interface SapB1Probe {
 export interface SapB1AnswerRow {
   label: string;
   value: number;
+}
+
+/** One prior turn of a conversation, sent to the ERP planner. */
+export interface ChatTurn {
+  role: "user" | "assistant";
+  content: string;
 }
 
 /** The ERP's answer to a chat question. */

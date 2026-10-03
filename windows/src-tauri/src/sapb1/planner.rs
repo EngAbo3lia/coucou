@@ -12,6 +12,7 @@
 //! assistant asks rather than guessing, which is the whole point of the change.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use super::query;
 use crate::providers::{self, ApiStyle};
@@ -220,6 +221,10 @@ like DocTotal or a query string. Welcome them first. Reply naturally to a greeti
 non-data question; only query the ERP when they ask about their own figures (sales, orders, customers, invoices, \
 stock, receivables, purchases, employees, top customers, and so on).\
 \n\n\
+You are in an ongoing conversation and you can see the prior turns. Never repeat a question you \
+already asked: if the user has answered, use their answer and act. Only ask when something you \
+genuinely need is still missing.\
+\n\n\
 You may query the ERP. When you do, return a single JSON object and nothing else. No prose, no markdown fences.\
 \n\n\
 The JSON shape:\n\
@@ -250,9 +255,23 @@ fn prompt() -> String {
     format!("{SYSTEM_PROMPT}\n{}", catalogue_context())
 }
 
+/// One prior turn of the ERP conversation, so the model is aware of what it
+/// already asked and what the user answered. The model is the brain here, not a
+/// keyword matcher: without this it re-asks the same question forever.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatTurn {
+    /// "user" | "assistant".
+    pub role: String,
+    pub content: String,
+}
+
+/// How many prior turns are sent. Enough for context, bounded for token cost.
+const HISTORY_CAP: usize = 20;
+
 /// Resolves the backend the planner should use: the SAP agent's binding, falling
 /// back to the global chat backend. Returns an error when nothing is configured,
-/// which the caller turns into the static-fallback path.
+/// which the caller turns into a friendly "configure a backend" message.
 pub fn resolve_backend(settings: &Settings) -> Result<(String, String), String> {
     let (provider, model) = settings.binding_or_default("integration_sapb1");
     if provider.is_empty() {
@@ -261,8 +280,37 @@ pub fn resolve_backend(settings: &Settings) -> Result<(String, String), String> 
     Ok((provider, model))
 }
 
-/// Runs the planner: model → JSON → Plan → validation.
-pub async fn plan(settings: &Settings, question: &str) -> Result<Plan, String> {
+/// The Anthropic `{role, content}` messages: prior turns, then the new question.
+fn anthropic_messages(history: &[ChatTurn], question: &str) -> Vec<serde_json::Value> {
+    let mut messages: Vec<serde_json::Value> = history
+        .iter()
+        .rev()
+        .take(HISTORY_CAP)
+        .rev()
+        .map(|t| serde_json::json!({ "role": t.role, "content": t.content }))
+        .collect();
+    messages.push(serde_json::json!({ "role": "user", "content": question }));
+    messages
+}
+
+/// The OpenAI messages: the system prompt first, then the same turns.
+fn openai_messages(system: &str, history: &[ChatTurn], question: &str) -> Vec<serde_json::Value> {
+    let mut messages: Vec<serde_json::Value> = Vec::new();
+    messages.push(serde_json::json!({ "role": "system", "content": system }));
+    for t in history.iter().rev().take(HISTORY_CAP).rev() {
+        messages.push(serde_json::json!({ "role": t.role, "content": t.content }));
+    }
+    messages.push(serde_json::json!({ "role": "user", "content": question }));
+    messages
+}
+
+/// Runs the planner: model → JSON → Plan → validation. `history` is the
+/// conversation so far, so the model stays aware and does not re-ask.
+pub async fn plan(
+    settings: &Settings,
+    question: &str,
+    history: &[ChatTurn],
+) -> Result<Plan, String> {
     let (provider_id, model) = resolve_backend(settings)?;
     let backend = providers::resolve(settings, &provider_id);
     if backend.needs_key() && backend.key.is_empty() {
@@ -276,22 +324,18 @@ pub async fn plan(settings: &Settings, question: &str) -> Result<Plan, String> {
     if model.is_empty() {
         return Err("Pick a model for the SAP agent first.".into());
     }
+    if backend.base().is_empty() {
+        return Err("Set the endpoint URL for the SAP backend first.".into());
+    }
 
+    let system = prompt();
     let raw = match backend.style {
         ApiStyle::Anthropic => {
-            if backend.base().is_empty() {
-                return Err("Set the endpoint URL for the SAP backend first.".into());
-            }
-            crate::claude::chat_plain(backend.base(), &model, &backend.key, &prompt(), question).await?
+            let messages = anthropic_messages(history, question);
+            crate::claude::chat_plain(backend.base(), &model, &backend.key, &system, &messages).await?
         }
         ApiStyle::OpenAICompatible => {
-            if backend.base().is_empty() {
-                return Err("Set the endpoint URL for the SAP backend first.".into());
-            }
-            let messages: Vec<serde_json::Value> = vec![
-                serde_json::json!({ "role": "system", "content": prompt() }),
-                serde_json::json!({ "role": "user", "content": question }),
-            ];
+            let messages = openai_messages(&system, history, question);
             crate::openai::chat(backend.base(), Some(backend.key.as_str()), &model, &messages).await?
         }
     };
@@ -308,9 +352,92 @@ fn parse_plan_json(raw: &str) -> Result<Plan, String> {
     let start = raw.find('{').ok_or("The model returned no JSON.")?;
     let end = raw.rfind('}').ok_or("The model returned no JSON.")?;
     let slice = &raw[start..=end];
-    let plan: Plan =
+    let value: Value =
         serde_json::from_str(slice).map_err(|e| format!("Bad plan from the model: {e}"))?;
-    Ok(plan)
+    Ok(plan_from_value(&value))
+}
+
+/// A string from a value that may be a string, a number, or a one-item array.
+/// Models drift: `"entitySet": ["Invoices"]` is wrong but must not throw the
+/// whole plan away.
+fn as_string(v: &Value) -> Option<String> {
+    match v {
+        Value::String(s) => {
+            let t = s.trim();
+            if t.is_empty() {
+                None
+            } else {
+                Some(t.to_string())
+            }
+        }
+        Value::Number(n) => Some(n.to_string()),
+        Value::Bool(b) => Some(b.to_string()),
+        Value::Array(a) => a.iter().find_map(as_string),
+        _ => None,
+    }
+}
+
+/// A list of strings from an array or a single string.
+fn as_string_list(v: &Value) -> Vec<String> {
+    match v {
+        Value::Array(a) => a.iter().filter_map(as_string).collect(),
+        Value::Null => Vec::new(),
+        other => as_string(other).into_iter().collect(),
+    }
+}
+
+fn as_time_window(v: &Value) -> Option<TimeWindow> {
+    let s = as_string(v)?;
+    serde_json::from_value(Value::String(s)).ok()
+}
+
+fn as_metrics(v: &Value) -> Vec<MetricSpec> {
+    let items: Vec<&Value> = match v {
+        Value::Array(a) => a.iter().collect(),
+        Value::Null => Vec::new(),
+        other => vec![other],
+    };
+    items
+        .into_iter()
+        .filter_map(|m| {
+            let field = m.get("field").and_then(as_string).unwrap_or_default();
+            let op = m
+                .get("op")
+                .and_then(as_string)
+                .unwrap_or_else(|| "sum".to_string());
+            let alias = m
+                .get("alias")
+                .and_then(as_string)
+                .unwrap_or_else(|| "Total".to_string());
+            Some(MetricSpec { field, op, alias })
+        })
+        .collect()
+}
+
+fn as_filter(v: &Value) -> Option<FilterSpec> {
+    let field = v.get("field").and_then(as_string)?;
+    let op = v.get("op").and_then(as_string)?;
+    let value = v.get("value").and_then(as_string)?;
+    Some(FilterSpec { field, op, value })
+}
+
+/// Builds a plan field by field with coercion, so one odd shape does not discard
+/// an otherwise usable plan.
+fn plan_from_value(v: &Value) -> Plan {
+    Plan {
+        kind: v
+            .get("kind")
+            .and_then(as_string)
+            .unwrap_or_else(|| "clarify".to_string()),
+        entity_set: v.get("entitySet").and_then(as_string),
+        subtract_entity_set: v.get("subtractEntitySet").and_then(as_string),
+        group_by: v.get("groupBy").map(as_string_list).unwrap_or_default(),
+        metrics: v.get("metrics").map(as_metrics).unwrap_or_default(),
+        filter: v.get("filter").filter(|f| !f.is_null()).and_then(as_filter),
+        time_window: v.get("timeWindow").and_then(as_time_window),
+        clarifying_question: v.get("clarifyingQuestion").and_then(as_string),
+        summary: v.get("summary").and_then(as_string).unwrap_or_default(),
+    }
 }
 
 #[cfg(test)]
@@ -426,6 +553,36 @@ mod tests {
     fn garbage_is_an_error() {
         assert!(parse_plan_json("no json here").is_err());
         assert!(parse_plan_json("{\"kind\":\"aggregate\"}").is_ok(), "unknown fields are allowed");
+    }
+
+    #[test]
+    fn an_array_where_a_string_belongs_is_coerced_not_fatal() {
+        // The exact shape that produced "invalid type: sequence, expected a
+        // string at line 7 column 57" in the running app.
+        let raw = r#"{
+            "kind": "aggregate",
+            "entitySet": ["Invoices"],
+            "subtractEntitySet": ["CreditNotes"],
+            "groupBy": "DocDate",
+            "metrics": [{"field": "DocTotal", "op": "sum", "alias": "Total"}],
+            "filter": null,
+            "timeWindow": ["last_month"],
+            "clarifyingQuestion": null,
+            "summary": ["Sales for last month"]
+        }"#;
+        let p = parse_plan_json(raw).unwrap();
+        assert_eq!(p.entity_set.as_deref(), Some("Invoices"));
+        assert_eq!(p.subtract_entity_set.as_deref(), Some("CreditNotes"));
+        assert_eq!(p.group_by, vec!["DocDate".to_string()]);
+        assert_eq!(p.time_window, Some(TimeWindow::LastMonth));
+        assert_eq!(p.summary, "Sales for last month");
+        assert!(p.validated().is_ok(), "{:?}", p.validated());
+    }
+
+    #[test]
+    fn a_missing_kind_defaults_to_a_clarification() {
+        let p = parse_plan_json(r#"{"summary":"what period?"}"#).unwrap();
+        assert!(p.is_clarify());
     }
 
     #[test]

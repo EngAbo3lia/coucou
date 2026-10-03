@@ -178,61 +178,60 @@ mod tests {
         assert!(probe.ready, "not ready: {:?}", probe.sets);
     }
 
-    /// Every intent the island chat can reach, against a real server. This is the
-    /// only proof that the questions a user types produce figures rather than an
-    /// error: `detect` alone only proves the routing, never the query.
+    /// Drives the real planner path against a live server and the configured chat
+    /// backend, so a two-turn clarification is exercised end to end. The model is
+    /// non-deterministic, so this asserts the shape (a valid kind), not exact text.
     ///
-    /// Reads the same Credential Manager entries the app uses, so no credential
-    /// is ever typed into a command line or left in shell history:
+    /// Reads the same Credential Manager entries the app uses:
     /// `cargo test --release --lib live_ask -- --ignored --nocapture`
     #[test]
-    #[ignore = "needs a live Service Layer"]
+    #[ignore = "needs a live Service Layer and a configured chat backend"]
     fn live_ask_answers_every_intent() {
         let c = credentials_from_secrets().expect("SAP credentials in the Credential Manager");
-        // Force the deterministic fallback so the test is stable whether or not a
-        // chat key is present: with no backend the planner errors and falls back.
-        let mut settings = crate::settings::Settings::default();
-        settings.provider = String::new();
-        settings.model = String::new();
+        let settings = crate::settings::load();
 
-        // The exact wording that reached the help text instead of the report.
-        let cases = [
-            ("whats our orders?", "open sales orders"),
-            ("hi", "business assistant"),
-            ("sales total", "net sales"),
-            ("sales by month", "sales by month"),
-            ("top customers", "top customers"),
-            ("purchases total", "purchases"),
-            ("purchases by month", "purchases by month"),
-            ("top vendors", "top vendors"),
-            ("who owes us", "receivables"),
-            ("how many orders", "sales orders:"),
-            ("how many invoices", "sales invoices:"),
+        let questions = [
+            "hi",
+            "what are our sales",
+            "how many invoices do we have",
+            "how many employees",
+            "sales by month last year",
         ];
-
-        for (question, expect) in cases {
-            let answer = tauri::async_runtime::block_on(ask::ask(&c, &settings, question))
-                .unwrap_or_else(|e| panic!("{question:?} failed: {e}"));
-            println!("--- {question} ---\n{}\nsource: {}", answer.text, answer.source);
+        for q in questions {
+            let answer = tauri::async_runtime::block_on(ask::ask(&c, &settings, q, &[]))
+                .unwrap_or_else(|e| panic!("{q:?} failed: {e}"));
+            println!("--- {q} ---\nkind={} plan={:?}\n{}", answer.kind, answer.plan, answer.text);
             assert!(
-                answer.text.to_lowercase().contains(expect),
-                "{question:?} gave {:?}, which does not mention {expect:?}",
-                answer.text
+                matches!(answer.kind.as_str(), "result" | "answer" | "clarify"),
+                "{q:?} returned an unknown kind {:?}",
+                answer.kind
             );
-            if question == "hi" {
-                // A greeting must welcome first, never dump a technical list, and
-                // never offer clickable chips.
-                assert_eq!(answer.kind, "answer");
-                assert!(answer.suggestions.is_empty());
-                assert!(answer.rows.is_empty());
-                assert_eq!(answer.source, "no query run");
-            } else {
-                assert!(!answer.source.is_empty(), "{question:?} reported no source");
-                assert!(
-                    answer.suggestions.is_empty(),
-                    "{question:?} was understood, so it should not suggest anything"
-                );
-            }
         }
+    }
+
+    /// Two turns: the model must use the first answer to resolve the second turn
+    /// instead of re-asking. This is the awareness the chat needs.
+    #[test]
+    #[ignore = "needs a live Service Layer and a configured chat backend"]
+    fn live_conversation_resolves_a_clarification() {
+        let c = credentials_from_secrets().expect("SAP credentials");
+        let settings = crate::settings::load();
+
+        let first = tauri::async_runtime::block_on(ask::ask(&c, &settings, "give me sales", &[]))
+            .expect("first turn");
+        println!("first: kind={} {}", first.kind, first.text);
+
+        let history = vec![
+            planner::ChatTurn { role: "user".into(), content: "give me sales".into() },
+            planner::ChatTurn { role: "assistant".into(), content: first.text.clone() },
+        ];
+        let second = tauri::async_runtime::block_on(ask::ask(&c, &settings, "last month", &history))
+            .expect("second turn");
+        println!("second: kind={} {}", second.kind, second.text);
+        assert!(
+            second.kind != "clarify",
+            "with the history the model should not re-ask: {}",
+            second.text
+        );
     }
 }

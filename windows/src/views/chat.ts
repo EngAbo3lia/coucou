@@ -70,8 +70,9 @@ function reportCard(a: SapB1Answer): HTMLElement {
     card.append(total);
   }
 
-  // The human summary line; the technical provenance is not shown to the user.
-  if (a.text && a.text !== a.title) {
+  // The human note, only when there is no chart to read. A report with rows
+  // already shows the figures as bars, so a second text block would duplicate.
+  if (a.text && a.text !== a.title && a.rows.length === 0) {
     card.append(h("div", { class: "report-note", text: a.text }));
   }
   return card;
@@ -187,16 +188,29 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
         const reply = await Bridge.opencodeRun(target.sessionId, target.directory, query, model);
         State.chatHistory.push({ id: nextId++, role: "assistant", content: reply });
       } else if (target?.kind === "sapb1") {
-        const answer = await Bridge.sapB1Ask(query);
+        // Send the conversation so far so the planner stays aware and does not
+        // re-ask a question it already asked. Exclude the message we just added.
+        const history = State.chatHistory
+          .slice(0, -1)
+          .slice(-20)
+          .map((m) => ({ role: m.role, content: m.content }));
+        const answer = await Bridge.sapB1Ask(query, history);
         State.chatSuggestions = [];
         if (answer.kind === "result") {
           // The plan bubble, then the report. Same turn, so they land together.
           if (answer.plan) {
             State.chatHistory.push({ id: nextId++, role: "assistant", content: answer.plan, plan: true });
           }
-          State.chatHistory.push({ id: nextId++, role: "assistant", content: answer.text, report: answer });
+          // The content is what the model reads back as history; the report card
+          // is what the user sees. Keep the content human so context is not blank.
+          State.chatHistory.push({
+            id: nextId++,
+            role: "assistant",
+            content: answer.text || answer.title,
+            report: answer,
+          });
         } else {
-          // clarify, answer, or help: a plain message, no chips.
+          // clarify or answer: a plain message, no chips.
           State.chatHistory.push({ id: nextId++, role: "assistant", content: answer.text });
         }
       } else {

@@ -1,28 +1,24 @@
 //! Answers questions about the ERP from the island chat.
 //!
-//! Two paths:
-//!
-//!   - Planner path: the question is handed to the configured chat model with a
-//!     slice of the catalogue. The model returns a structured `Plan`, which is
-//!     validated against the report allowlists and executed. When the plan needs
-//!     a period or a choice, the assistant asks the user in text (a stateful
-//!     clarifying turn) instead of guessing. This is the agentic path.
-//!   - Fallback path: when no chat backend is configured, the same deterministic
-//!     intents as before. Nothing is invented; an unmatched question returns the
-//!     list of what this can answer.
+//! The model is the brain. A question plus the conversation so far goes to the
+//! configured chat backend, which returns a structured `Plan`. The plan is
+//! validated against the report allowlists and executed. Nothing here does
+//! keyword routing: the model decides what to ask, what to run, and how to
+//! answer. The only hard guard is the validator — a plan can never read a field
+//! outside the allowlist, and filter values are sanitised before they reach the
+//! query string.
 //!
 //! The queries respect the rules in `query` — no `$filter` with `$apply`, no date
 //! functions in `groupby` — so the executor fetches raw rows and slices, buckets
 //! and sums in Rust rather than asking the server to do something it rejects.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
 
 use serde::Serialize;
 use serde_json::Value;
 
 use super::dates;
-use super::planner::{self, Plan, PlanKind};
+use super::planner::{self, ChatTurn, Plan, PlanKind};
 use super::query;
 use super::transport::{self, Credentials};
 use crate::settings::Settings;
@@ -46,16 +42,15 @@ pub struct Answer {
     pub total: Option<f64>,
     /// True when a row cap cut the data set, so the figure is a lower bound.
     pub partial: bool,
-    /// Which query produced this, so the figure can be trusted or challenged.
+    /// Which data produced this, so the figure can be trusted or challenged.
     pub source: String,
-    /// "result" | "clarify" | "help". The front end renders each differently.
+    /// "result" | "clarify" | "answer".
     pub kind: String,
     /// The "what I'll do" bubble, shown before a result.
     pub plan: Option<String>,
     /// The question the assistant needs answered before it can run.
     pub clarifying_question: Option<String>,
-    /// Tappable follow-ups, only in the no-LLM fallback. Not rendered as chips
-    /// when the planner is active — the assistant asks conversationally instead.
+    /// Kept for wire compatibility; the planner path never fills it.
     pub suggestions: Vec<String>,
 }
 
@@ -76,94 +71,33 @@ impl Default for Answer {
     }
 }
 
-/// The clarifying turn in flight: the original question and its plan, so the
-/// user's answer can be folded back in and re-planned.
-struct PendingPlan {
-    question: String,
-    plan: Plan,
-}
-
-static PENDING: Mutex<Option<PendingPlan>> = Mutex::new(None);
-
-fn store_pending(p: PendingPlan) {
-    *PENDING.lock().unwrap() = Some(p);
-}
-
-fn take_pending() -> Option<PendingPlan> {
-    PENDING.lock().unwrap().take()
-}
-
-/// Clears any clarifying turn in flight. Called when the chat leaves the ERP.
-pub fn clear_pending() {
-    *PENDING.lock().unwrap() = None;
-}
-
-/// Whether a clarifying turn is in flight, so the front end can point the chat
-/// back at the ERP or clear it.
-pub fn pending_clarification() -> bool {
-    PENDING.lock().unwrap().is_some()
-}
-
-/// The main entry. `settings` decides which backend the planner uses; the ERP
-/// credentials come from the Credential Manager.
-pub async fn ask(c: &Credentials, settings: &Settings, question: &str) -> Result<Answer, String> {
-    // A clarifying turn in flight means this message is the answer.
-    if let Some(pending) = take_pending() {
-        return answer_clarification(c, settings, pending, question).await;
-    }
-
-    match planner::plan(settings, question).await {
-        Ok(plan) if plan.is_clarify() => {
-            store_pending(PendingPlan {
-                question: question.to_string(),
-                plan: plan.clone(),
-            });
-            Ok(clarify_answer(&plan))
-        }
-        Ok(plan) if plan.is_answer() => Ok(answer_reply(&plan)),
-        Ok(plan) => execute(c, &plan).await,
-        // No backend/key/binding, or the model could not produce a plan: fall
-        // back to the deterministic intents rather than leaving a dead end.
-        Err(_) => fallback(c, question).await,
-    }
-}
-
-/// The user answered a clarifying question: fold the answer into the original
-/// question, re-plan, and run. Still ambiguous → ask again.
-async fn answer_clarification(
+/// The main entry. `history` is the conversation so far, so the model is aware of
+/// what it already asked. A missing backend is a clean error, never a silent
+/// keyword match.
+pub async fn ask(
     c: &Credentials,
     settings: &Settings,
-    pending: PendingPlan,
-    answer: &str,
+    question: &str,
+    history: &[ChatTurn],
 ) -> Result<Answer, String> {
-    let combined = format!("{} {}", pending.question, answer.trim());
-    match planner::plan(settings, &combined).await {
-        Ok(plan) if plan.is_clarify() => {
-            store_pending(PendingPlan {
-                question: combined,
-                plan: plan.clone(),
-            });
-            Ok(clarify_answer(&plan))
+    let plan = planner::plan(settings, question, history).await.map_err(|e| {
+        // Never surface a raw serde/internal string to the user.
+        if e.contains("No chat backend") {
+            "No AI backend is set up for the SAP Harness. Configure one in Settings → Agents, then ask again.".to_string()
+        } else if e.contains("Bad plan") || e.contains("no JSON") {
+            "I couldn't work out how to answer that one. Try asking it a different way.".to_string()
+        } else {
+            e
         }
-        Ok(plan) if plan.is_answer() => Ok(answer_reply(&plan)),
-        Ok(plan) => execute(c, &plan).await,
-        Err(_) => fallback(c, &combined).await,
-    }
-}
+    })?;
 
-fn answer_reply(plan: &Plan) -> Answer {
-    let text = if plan.summary.trim().is_empty() {
-        "I can help with your sales, orders, customers, stock and more. What would you like to know?".into()
-    } else {
-        plan.summary.clone()
-    };
-    Answer {
-        title: "Mochi".into(),
-        text,
-        kind: "answer".into(),
-        source: "no query run".into(),
-        ..Answer::default()
+    if plan.is_clarify() {
+        return Ok(clarify_answer(&plan));
     }
+    if plan.is_answer() {
+        return Ok(answer_reply(&plan));
+    }
+    execute(c, &plan).await
 }
 
 fn clarify_answer(plan: &Plan) -> Answer {
@@ -181,94 +115,18 @@ fn clarify_answer(plan: &Plan) -> Answer {
     }
 }
 
-// ── deterministic fallback ────────────────────────────────────────────────────
-
-/// Keyword detection for the fallback path. Order matters: the most specific
-/// intent wins. This is only reached when the planner is unavailable, but it must
-/// still handle the user's wording, not ours.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Intent {
-    SalesByMonth,
-    TopCustomers,
-    SalesTotal,
-    OpenOrders,
-    Receivables,
-    PurchasesByMonth,
-    TopVendors,
-    PurchasesTotal,
-    OrderCount,
-    InvoiceCount,
-    EmployeeCount,
-    Unknown,
-}
-
-pub fn detect(question: &str) -> Intent {
-    let q = question.to_lowercase();
-    let has = |words: &[&str]| words.iter().any(|w| q.contains(w));
-    let has_order = has(&["order", "backlog", "booked", "pending order"]);
-    if has(&["top customer", "best customer", "largest customer", "top clients", "top buyer"]) {
-        Intent::TopCustomers
-    } else if has(&["top vendor", "top supplier", "best supplier", "top vendors"]) {
-        Intent::TopVendors
-    } else if has(&[
-        "receivable", "outstanding", "owed", "who owes", "aging", "ageing", "unpaid",
-    ]) {
-        Intent::Receivables
-    } else if has(&["employee", "staff", "headcount", "people work", "team size"]) {
-        Intent::EmployeeCount
-    } else if has(&["sales by month", "sales per month", "monthly sales", "sales trend"])
-        || (has(&["month", "monthly", "trend"]) && has(&["sale", "revenue", "turnover"]))
-    {
-        Intent::SalesByMonth
-    } else if has(&["purchase by month", "purchases by month", "monthly purchase", "spend by month", "spend trend"])
-        || (has(&["purchase", "spend", "procurement"]) && has(&["month", "trend", "monthly"]))
-    {
-        Intent::PurchasesByMonth
-    } else if has(&["how many order", "order count", "number of order", "count of order", "count our order", "count the order", "total order", "order total"])
-        || (has(&["how many", "total", "count"]) && has(&["order"]))
-    {
-        // Before the orders report: "how many orders" also contains "order".
-        Intent::OrderCount
-    } else if has(&["how many invoice", "invoice count", "number of invoice", "count of invoice", "count our invoice", "total invoice", "invoice total"])
-        || (has(&["how many", "total", "count"]) && has(&["invoice", "receipt"]))
-    {
-        Intent::InvoiceCount
-    } else if has_order {
-        Intent::OpenOrders
-    } else if has(&["sale", "revenue", "turnover", "income", "how much did we sell", "total sale"]) {
-        Intent::SalesTotal
-    } else if has(&["purchase", "spend", "procurement", "vendor bill"]) {
-        Intent::PurchasesTotal
+fn answer_reply(plan: &Plan) -> Answer {
+    let text = if plan.summary.trim().is_empty() {
+        "I can help with your sales, orders, customers, stock and more. What would you like to know?".into()
     } else {
-        Intent::Unknown
-    }
-}
-
-pub const HELP: &str = "Hi! I'm your business assistant. I can pull your sales, orders, customers, \
-invoices, receivables, purchases, stock and employee count from your SAP data. Ask me for a figure and I'll get it for you.";
-
-async fn fallback(c: &Credentials, question: &str) -> Result<Answer, String> {
-    match detect(question) {
-        Intent::SalesTotal => net_sales(c).await,
-        Intent::SalesByMonth => sales_by_month(c).await,
-        Intent::TopCustomers => top_partners(c, "Invoices", "Top customers by invoiced value").await,
-        Intent::PurchasesTotal => purchases_total(c).await,
-        Intent::PurchasesByMonth => purchases_by_month(c).await,
-        Intent::TopVendors => top_partners(c, "PurchaseInvoices", "Top vendors by purchase value").await,
-        Intent::OpenOrders => open_orders(c).await,
-        Intent::Receivables => receivables(c).await,
-        Intent::OrderCount => count(c, "Orders", "Sales orders").await,
-        Intent::InvoiceCount => count(c, "Invoices", "Sales invoices").await,
-        Intent::EmployeeCount => count(c, "EmployeesInfo", "Employees").await,
-        // A greeting or an off-topic question: welcome first, then say what this
-        // can answer — never a dead-end wall of text, and no clickable chips.
-        Intent::Unknown => Ok(Answer {
-            title: "Mochi".into(),
-            text: HELP.into(),
-            kind: "answer".into(),
-            source: "no query run".into(),
-            ..Answer::default()
-        }),
+        plan.summary.clone()
+    };
+    Answer {
+        title: "Mochi".into(),
+        text,
+        kind: "answer".into(),
+        source: "no query run".into(),
+        ..Answer::default()
     }
 }
 
@@ -293,6 +151,46 @@ async fn execute(c: &Credentials, plan: &Plan) -> Result<Answer, String> {
     }
 }
 
+/// A filter value as a safe OData literal. The field and the operator are
+/// validated by `Plan::validated()`; the value is checked here so a value can
+/// never break out of the literal or append a clause.
+fn filter_literal(value: &str) -> Result<String, String> {
+    let v = value.trim();
+    if v.is_empty() {
+        return Err("Empty filter value.".into());
+    }
+    // Anything that could close the literal or start a new clause is refused.
+    if v.chars()
+        .any(|c| matches!(c, '\'' | '"' | ';' | '&' | '%' | '$' | '(' | ')' | '\\' | '|'))
+    {
+        return Err(format!("Unsafe filter value {v:?}."));
+    }
+    if is_iso_date(v) {
+        // `datetime'...'`, the form verified against the live server.
+        return Ok(format!("datetime'{v}'"));
+    }
+    if v.parse::<f64>().is_ok() {
+        return Ok(v.to_string());
+    }
+    // A plain string literal (an enum like bost_Open, a status word, a code).
+    if v.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ' ' | '/' | ':' | '@'))
+    {
+        Ok(format!("'{v}'"))
+    } else {
+        Err(format!("Unsafe filter value {v:?}."))
+    }
+}
+
+fn is_iso_date(v: &str) -> bool {
+    v.len() == 10
+        && v.as_bytes()[4] == b'-'
+        && v.as_bytes()[7] == b'-'
+        && v[..4].bytes().all(|b| b.is_ascii_digit())
+        && v[5..7].bytes().all(|b| b.is_ascii_digit())
+        && v[8..].bytes().all(|b| b.is_ascii_digit())
+}
+
 /// Fetches rows for a set, then filters them by the date range (if any) on the
 /// `DocDate` field. The dataset is small enough to page once; the row cap is a
 /// lower-bound guard, not a filter.
@@ -307,7 +205,11 @@ async fn fetch_rows(
         fields.push("DocDate".into());
     }
     let select = fields.join(",");
-    let query = format!("{set}?$select={select}&$top={ROW_CAP}");
+    let query = if select.is_empty() {
+        format!("{set}?$top={ROW_CAP}")
+    } else {
+        format!("{set}?$select={select}&$top={ROW_CAP}")
+    };
     let rows = transport::get(c, &query).await?;
     let list = rows.get("value").and_then(Value::as_array).cloned().unwrap_or_default();
     let filtered: Vec<Value> = if let Some((start, end)) = range {
@@ -345,12 +247,13 @@ async fn aggregate_total(
 
     if is_count {
         let n = count_with_filter(c, set, plan, &range).await?;
+        let title = title_for(plan);
         return Ok(Answer {
-            title: set.to_string(),
-            text: format!("{set}: {n}"),
+            title: title.clone(),
+            text: String::new(),
             total: Some(n as f64),
             source,
-            plan: Some(plan.summary.clone()),
+            plan: Some(title),
             ..Answer::default()
         });
     }
@@ -358,7 +261,7 @@ async fn aggregate_total(
     let Some(metric) = metric else {
         return Err("The plan has no metric.".into());
     };
-    let mut select = vec![metric.field.clone()];
+    let select = vec![metric.field.clone()];
     let (rows, partial) = fetch_rows(c, set, &select, &range).await?;
     let mut value = aggregate_rows(&rows, &metric.field, &metric.op, None).unwrap_or(0.0);
 
@@ -369,11 +272,9 @@ async fn aggregate_total(
         value -= aggregate_rows(&sub_rows, &metric.field, &metric.op, None).unwrap_or(0.0);
     }
 
-    let title = plan.summary.clone();
-    // The report card shows the title and the total; the note is only a
-    // human line when there is nothing to chart.
+    let title = title_for(plan);
     let text = if value == 0.0 && range.is_some() {
-        "No invoices in this period.".to_string()
+        "No data in this period.".to_string()
     } else {
         String::new()
     };
@@ -383,7 +284,7 @@ async fn aggregate_total(
         total: Some(value),
         partial,
         source,
-        plan: Some(plan.summary.clone()),
+        plan: Some(title),
         ..Answer::default()
     })
 }
@@ -427,16 +328,15 @@ async fn grouped(
         })
         .collect();
     let total: f64 = rows.iter().map(|r| r.value).sum();
-    let title = plan.summary.clone();
-    let text = String::new();
+    let title = title_for(plan);
     Ok(Answer {
         title: title.clone(),
-        text,
+        text: String::new(),
         rows,
         total: Some(total),
         partial,
         source,
-        plan: Some(plan.summary.clone()),
+        plan: Some(title),
         ..Answer::default()
     })
 }
@@ -449,12 +349,13 @@ async fn count_plan(
     let set = plan.entity_set.as_deref().unwrap_or("");
     let n = count_with_filter(c, set, plan, &range).await?;
     let source = build_source(plan, &range);
+    let title = title_for(plan);
     Ok(Answer {
-        title: set.to_string(),
+        title: title.clone(),
         text: String::new(),
         total: Some(n as f64),
         source,
-        plan: Some(plan.summary.clone()),
+        plan: Some(title),
         ..Answer::default()
     })
 }
@@ -471,7 +372,8 @@ async fn count_with_filter(
         filter.push(format!("DocDate le datetime'{end}'"));
     }
     if let Some(f) = &plan.filter {
-        filter.push(format!("{} {} {}", f.field, f.op, f.value));
+        // The field and op were validated; the value is sanitised here.
+        filter.push(format!("{} {} {}", f.field, f.op, filter_literal(&f.value)?));
     }
     let query = if filter.is_empty() {
         format!("{set}/$count")
@@ -490,15 +392,9 @@ async fn list_plan(
     let set = plan.entity_set.as_deref().unwrap_or("");
     let source = build_source(plan, &range);
     let (rows, partial) = fetch_rows(c, set, &[], &range).await?;
-    // Pick the first string field as the label and the first numeric field as
-    // the value, so a bare list is still readable.
     let label_field = pick_label_field(set);
     let value_field = metric_field(plan);
-    let value_field = if value_field.is_empty() {
-        "DocTotal".to_string()
-    } else {
-        value_field
-    };
+    let value_field = if value_field.is_empty() { "DocTotal".to_string() } else { value_field };
     let mut out: Vec<AnswerRow> = rows
         .iter()
         .filter_map(|r| {
@@ -514,16 +410,15 @@ async fn list_plan(
         .collect();
     out.sort_by(|a, b| b.value.total_cmp(&a.value));
     let total: f64 = out.iter().map(|r| r.value).sum();
-    let title = plan.summary.clone();
-    let text = String::new();
+    let title = title_for(plan);
     Ok(Answer {
         title: title.clone(),
-        text,
+        text: String::new(),
         rows: out,
         total: Some(total),
         partial,
         source,
-        plan: Some(plan.summary.clone()),
+        plan: Some(title),
         ..Answer::default()
     })
 }
@@ -537,15 +432,8 @@ fn pick_label_field(set: &str) -> String {
     "DocNum".to_string()
 }
 
-/// Sums or averages the rows over one field, optionally grouped. Used by the
-/// executor after the rows come down; the server-side `$apply` path is not used
-/// for windowed aggregates because it cannot carry a `$filter`.
-fn aggregate_rows(
-    rows: &[Value],
-    field: &str,
-    op: &str,
-    dims: Option<&[String]>,
-) -> Option<f64> {
+/// Sums or averages the rows over one field, optionally grouped.
+fn aggregate_rows(rows: &[Value], field: &str, op: &str, dims: Option<&[String]>) -> Option<f64> {
     let mut map: HashMap<String, f64> = HashMap::new();
     let mut total = 0.0;
     let mut count = 0usize;
@@ -574,6 +462,8 @@ fn aggregate_rows(
     }
 }
 
+// ── titles ────────────────────────────────────────────────────────────────────
+
 fn build_source(plan: &Plan, range: &Option<(String, String)>) -> String {
     let set = plan.entity_set.as_deref().unwrap_or("");
     let mut parts = vec![set.to_string()];
@@ -586,165 +476,70 @@ fn build_source(plan: &Plan, range: &Option<(String, String)>) -> String {
     parts.join(", ")
 }
 
-// ── existing deterministic query builders (fallback) ─────────────────────────
-
-async fn net_sales(c: &Credentials) -> Result<Answer, String> {
-    let invoiced = aggregate_sum(c, "Invoices", "DocTotal").await?;
-    let credited = aggregate_sum(c, "CreditNotes", "DocTotal").await?;
-    let net = invoiced - credited;
-    Ok(Answer {
-        title: "Net sales".into(),
-        text: format!(
-            "Net sales (invoiced minus credit notes)\n  invoiced   {}\n  credit     {}\n  net        {}",
-            money(invoiced),
-            money(credited),
-            money(net)
-        ),
-        total: Some(net),
-        source: "Invoices and CreditNotes, sum of DocTotal".into(),
-        ..Answer::default()
-    })
+/// A friendly name for an entity set, for a human title — never a raw set name
+/// like "Invoices" when "sales" reads better, and never a field name.
+fn friendly_set(set: &str) -> &str {
+    match set {
+        "Invoices" => "Sales",
+        "PurchaseInvoices" => "Purchases",
+        "CreditNotes" => "Credit notes",
+        "PurchaseCreditNotes" => "Purchase credit notes",
+        "Orders" => "Sales orders",
+        "PurchaseOrders" => "Purchase orders",
+        "DeliveryNotes" => "Deliveries",
+        "BusinessPartners" => "Customers",
+        "EmployeesInfo" => "Employees",
+        "Items" => "Items",
+        "ItemGroups" => "Item groups",
+        _ => set,
+    }
 }
 
-async fn purchases_total(c: &Credentials) -> Result<Answer, String> {
-    let bought = aggregate_sum(c, "PurchaseInvoices", "DocTotal").await?;
-    let credited = aggregate_sum(c, "PurchaseCreditNotes", "DocTotal").await.unwrap_or(0.0);
-    let net = bought - credited;
-    Ok(Answer {
-        title: "Purchases".into(),
-        text: format!("Purchases (invoiced minus purchase credit notes)\n  net  {}", money(net)),
-        total: Some(net),
-        source: "PurchaseInvoices and PurchaseCreditNotes, sum of DocTotal".into(),
-        ..Answer::default()
-    })
+/// " last month", " last quarter" — appended to a title.
+fn time_label(w: Option<planner::TimeWindow>) -> &'static str {
+    use planner::TimeWindow::*;
+    match w {
+        Some(Today) => " today",
+        Some(Yesterday) => " yesterday",
+        Some(ThisWeek) => " this week",
+        Some(LastWeek) => " last week",
+        Some(ThisMonth) => " this month",
+        Some(LastMonth) => " last month",
+        Some(ThisQuarter) => " this quarter",
+        Some(LastQuarter) => " last quarter",
+        Some(ThisYear) => " this year",
+        Some(LastYear) => " last year",
+        Some(Last30Days) => " the last 30 days",
+        Some(All) | None => "",
+    }
 }
 
-async fn sales_by_month(c: &Credentials) -> Result<Answer, String> {
-    monthly(c, "Invoices", "Sales by month").await
+fn friendly_dim(dims: &[String]) -> &str {
+    if dims.iter().any(|d| d == "DocDate") {
+        "month"
+    } else if dims.iter().any(|d| d == "CardCode") {
+        "customer"
+    } else {
+        "value"
+    }
 }
 
-async fn purchases_by_month(c: &Credentials) -> Result<Answer, String> {
-    monthly(c, "PurchaseInvoices", "Purchases by month").await
-}
-
-async fn monthly(c: &Credentials, set: &str, title: &str) -> Result<Answer, String> {
-    let query = format!("{set}?$apply=groupby((DocDate),aggregate(DocTotal with sum as Total))");
-    let rows = transport::get(c, &query).await?;
-    let (buckets, seen) = month_buckets(rows.get("value").and_then(Value::as_array));
-    let source = format!("{set}, groupby DocDate, sum of DocTotal, bucketed to months");
-    Ok(answer_from_buckets(title, buckets, seen, &source))
-}
-
-async fn top_partners(c: &Credentials, set: &str, title: &str) -> Result<Answer, String> {
-    let query = format!("{set}?$apply=groupby((CardCode),aggregate(DocTotal with sum as Total))");
-    let rows = transport::get(c, &query).await?;
-    let names = partner_names(c).await.unwrap_or_default();
-    let mut pairs = value_pairs(rows.get("value").and_then(Value::as_array), "CardCode", "Total");
-    pairs.sort_by(|a, b| b.1.total_cmp(&a.1));
-    pairs.truncate(8);
-    let out: Vec<AnswerRow> = pairs
-        .into_iter()
-        .map(|(code, value)| AnswerRow {
-            label: names.get(&code).cloned().unwrap_or(code),
-            value,
-        })
-        .collect();
-    let total = out.iter().map(|r| r.value).sum();
-    Ok(Answer {
-        title: title.into(),
-        text: render(title, &out, Some(total)),
-        rows: out,
-        total: Some(total),
-        source: format!("{set}, groupby CardCode, sum of DocTotal"),
-        ..Answer::default()
-    })
-}
-
-async fn open_orders(c: &Credentials) -> Result<Answer, String> {
-    let query = "Orders?$select=DocEntry,DocTotal,CardName&$filter=DocumentStatus eq 'bost_Open'&$top=5000";
-    let rows = transport::get(c, query).await?;
-    let list = rows.get("value").and_then(Value::as_array);
-    let count = list.map_or(0, Vec::len);
-    let total: f64 = list
-        .map(|items| items.iter().filter_map(|r| r.get("DocTotal").and_then(Value::as_f64)).sum())
-        .unwrap_or(0.0);
-    let partial = count >= ROW_CAP;
-    Ok(Answer {
-        title: "Open sales orders".into(),
-        text: format!(
-            "Open sales orders\n  count  {count}{}\n  value  {}",
-            if partial { " (capped)" } else { "" },
-            money(total)
-        ),
-        total: Some(total),
-        partial,
-        source: "Orders where DocumentStatus is bost_Open".into(),
-        ..Answer::default()
-    })
-}
-
-async fn receivables(c: &Credentials) -> Result<Answer, String> {
-    let query = "BusinessPartners?$filter=CardType eq 'cCustomer'&$select=CardCode,CardName,CurrentAccountBalance&$top=5000";
-    let rows = transport::get(c, query).await?;
-    let list = rows.get("value").and_then(Value::as_array);
-    let mut owed: Vec<AnswerRow> = list
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|r| {
-                    let balance = r.get("CurrentAccountBalance").and_then(Value::as_f64)?;
-                    if balance <= 0.0 {
-                        return None;
-                    }
-                    Some(AnswerRow {
-                        label: r.get("CardName").and_then(Value::as_str).unwrap_or("?").to_string(),
-                        value: balance,
-                    })
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    owed.sort_by(|a, b| b.value.total_cmp(&a.value));
-    let total: f64 = owed.iter().map(|r| r.value).sum();
-    let partial = owed.len() > 8;
-    let mut top = owed;
-    top.truncate(8);
-    let body = render("Receivables (current account balance)", &top, Some(total));
-    Ok(Answer {
-        title: "Receivables".into(),
-        text: body,
-        rows: top,
-        total: Some(total),
-        partial,
-        source: "BusinessPartners where CardType is cCustomer, CurrentAccountBalance above zero".into(),
-        ..Answer::default()
-    })
-}
-
-async fn count(c: &Credentials, set: &str, title: &str) -> Result<Answer, String> {
-    let raw = transport::get_text(c, &format!("{set}/$count")).await?;
-    let n: i64 = raw.trim().trim_matches('"').parse().map_err(|_| format!("$count returned {raw:?}"))?;
-    Ok(Answer {
-        title: title.into(),
-        text: format!("{title}: {n}"),
-        total: Some(n as f64),
-        source: format!("{set}/$count"),
-        ..Answer::default()
-    })
-}
-
-// ── helpers ──────────────────────────────────────────────────────────────────
-
-async fn aggregate_sum(c: &Credentials, set: &str, field: &str) -> Result<f64, String> {
-    let query = format!("{set}?$apply=aggregate({field} with sum as Total)");
-    let rows = transport::get(c, &query).await?;
-    Ok(rows
-        .get("value")
-        .and_then(Value::as_array)
-        .and_then(|v| v.first())
-        .and_then(|r| r.get("Total"))
-        .and_then(Value::as_f64)
-        .unwrap_or(0.0))
+/// A clean, data-derived title for a report. Never carries an LLM placeholder
+/// like `<total>` or a raw field name like `DocTotal`.
+fn title_for(plan: &Plan) -> String {
+    let set = plan.entity_set.as_deref().unwrap_or("");
+    let base = if plan.subtract_entity_set.is_some() {
+        format!("Net {}", friendly_set(set).to_lowercase())
+    } else if plan.group_by.iter().any(|d| d == "CardCode") {
+        format!("Top {}", friendly_set(set).to_lowercase())
+    } else if plan.parsed_kind() == PlanKind::Count {
+        format!("Number of {}", friendly_set(set).to_lowercase())
+    } else if !plan.group_by.is_empty() {
+        format!("{} by {}", friendly_set(set), friendly_dim(&plan.group_by))
+    } else {
+        format!("Total {}", friendly_set(set).to_lowercase())
+    };
+    format!("{base}{}", time_label(plan.time_window))
 }
 
 async fn partner_names(c: &Credentials) -> Result<HashMap<String, String>, String> {
@@ -763,73 +558,6 @@ async fn partner_names(c: &Credentials) -> Result<HashMap<String, String>, Strin
     Ok(map)
 }
 
-fn month_buckets(rows: Option<&Vec<Value>>) -> (Vec<(String, f64)>, usize) {
-    let mut map: HashMap<String, f64> = HashMap::new();
-    let mut seen = 0;
-    if let Some(items) = rows {
-        seen = items.len();
-        for r in items {
-            let date = r.get("DocDate").and_then(Value::as_str).unwrap_or("");
-            let total = r.get("Total").and_then(Value::as_f64).unwrap_or(0.0);
-            if date.len() >= 7 {
-                *map.entry(date[..7].to_string()).or_default() += total;
-            }
-        }
-    }
-    let mut out: Vec<(String, f64)> = map.into_iter().collect();
-    out.sort_by(|a, b| a.0.cmp(&b.0));
-    (out, seen)
-}
-
-fn value_pairs(rows: Option<&Vec<Value>>, key: &str, value: &str) -> Vec<(String, f64)> {
-    rows.map(|items| {
-        items
-            .iter()
-            .filter_map(|r| {
-                let k = r.get(key).and_then(Value::as_str)?.to_string();
-                let v = r.get(value).and_then(Value::as_f64)?;
-                Some((k, v))
-            })
-            .collect()
-    })
-    .unwrap_or_default()
-}
-
-fn answer_from_buckets(title: &str, buckets: Vec<(String, f64)>, seen: usize, source: &str) -> Answer {
-    let rows: Vec<AnswerRow> = buckets
-        .into_iter()
-        .map(|(label, value)| AnswerRow { label, value })
-        .collect();
-    let total: f64 = rows.iter().map(|r| r.value).sum();
-    Answer {
-        title: title.into(),
-        text: render(title, &rows, Some(total)),
-        rows,
-        total: Some(total),
-        partial: seen >= ROW_CAP,
-        source: source.into(),
-        ..Answer::default()
-    }
-}
-
-fn render(title: &str, rows: &[AnswerRow], total: Option<f64>) -> String {
-    let mut lines = vec![title.to_string()];
-    for row in rows {
-        lines.push(format!("  {:<28} {}", row.label, money(row.value)));
-    }
-    if let Some(sum) = total {
-        lines.push(format!("  {:<28} {}", "total", money(sum)));
-    }
-    lines.join("\n")
-}
-
-fn count_value(value: &Value) -> i64 {
-    value
-        .as_i64()
-        .or_else(|| value.as_str().and_then(|s| s.trim().parse().ok()))
-        .unwrap_or(0)
-}
-
 /// Thousands separators, two decimals. Currency varies per document, so the
 /// figure is printed without a symbol rather than with a wrong one.
 pub fn money(value: f64) -> String {
@@ -846,62 +574,17 @@ pub fn money(value: f64) -> String {
     format!("{}{grouped}.{cents}", if negative { "-" } else { "" })
 }
 
+fn count_value(value: &Value) -> i64 {
+    value
+        .as_i64()
+        .or_else(|| value.as_str().and_then(|s| s.trim().parse().ok()))
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::Settings;
-
-    #[test]
-    fn keywords_pick_the_specific_intent() {
-        assert_eq!(detect("who are my top customers?"), Intent::TopCustomers);
-        assert_eq!(detect("sales by month"), Intent::SalesByMonth);
-        assert_eq!(detect("what are my receivables"), Intent::Receivables);
-        assert_eq!(detect("show open orders"), Intent::OpenOrders);
-        assert_eq!(detect("purchases by month"), Intent::PurchasesByMonth);
-        assert_eq!(detect("total revenue"), Intent::SalesTotal);
-        assert_eq!(detect("weather tomorrow"), Intent::Unknown);
-    }
-
-    #[test]
-    fn the_users_own_wording_reaches_the_report() {
-        assert_eq!(detect("hi"), Intent::Unknown);
-        assert_eq!(detect("whats our orders?"), Intent::OpenOrders);
-        assert_eq!(detect("our orders"), Intent::OpenOrders);
-        assert_eq!(detect("orders"), Intent::OpenOrders);
-        assert_eq!(detect("who owes us"), Intent::Receivables);
-        assert_eq!(detect("unpaid invoices"), Intent::Receivables);
-        assert_eq!(detect("how many orders do we have"), Intent::OrderCount);
-        assert_eq!(detect("how many invoices"), Intent::InvoiceCount);
-        assert_eq!(detect("sales this month"), Intent::SalesByMonth);
-        assert_eq!(detect("spend by month"), Intent::PurchasesByMonth);
-        assert_eq!(detect("how much did we sell"), Intent::SalesTotal);
-    }
-
-    #[test]
-    fn count_questions_are_not_orders_reports() {
-        assert_eq!(detect("how many orders"), Intent::OrderCount);
-        assert_eq!(detect("order count"), Intent::OrderCount);
-        assert_eq!(detect("invoice count"), Intent::InvoiceCount);
-    }
-
-    #[test]
-    fn month_needs_both_halves() {
-        assert_eq!(detect("sales"), Intent::SalesTotal);
-        assert_eq!(detect("sales this month"), Intent::SalesByMonth);
-        assert_eq!(detect("monthly sales trend"), Intent::SalesByMonth);
-    }
-
-    #[test]
-    fn months_bucket_and_sort() {
-        let rows = vec![
-            serde_json::json!({ "DocDate": "2025-03-04", "Total": 10.0 }),
-            serde_json::json!({ "DocDate": "2025-01-09", "Total": 5.0 }),
-            serde_json::json!({ "DocDate": "2025-03-21", "Total": 2.5 }),
-        ];
-        let (buckets, seen) = month_buckets(Some(&rows));
-        assert_eq!(seen, 3);
-        assert_eq!(buckets, vec![("2025-01".into(), 5.0), ("2025-03".into(), 12.5)]);
-    }
+    use super::planner::MetricSpec;
 
     #[test]
     fn money_groups_and_keeps_the_sign() {
@@ -914,6 +597,49 @@ mod tests {
     fn count_reads_number_or_string() {
         assert_eq!(count_value(&serde_json::json!(1406)), 1406);
         assert_eq!(count_value(&serde_json::json!("52")), 52);
+    }
+
+    #[test]
+    fn filter_values_are_literalised_safely() {
+        assert_eq!(filter_literal("bost_Open").unwrap(), "'bost_Open'");
+        assert_eq!(filter_literal("42").unwrap(), "42");
+        assert_eq!(filter_literal("2025-01-01").unwrap(), "datetime'2025-01-01'");
+        assert_eq!(filter_literal("C0001").unwrap(), "'C0001'");
+    }
+
+    #[test]
+    fn a_filter_value_cannot_break_out_of_the_literal() {
+        for bad in ["x' or '1' eq '1", "a; DROP", "a&b", "$top", "a'b", "a(b)", "a\\b", "a|b"] {
+            assert!(filter_literal(bad).is_err(), "{bad:?} should be refused");
+        }
+        assert!(filter_literal("").is_err());
+    }
+
+    #[test]
+    fn titles_are_human_and_never_carry_placeholders() {
+        let p = |kind: &str, set: &str, sub: Option<&str>, group: &[&str], w: Option<planner::TimeWindow>| {
+            Plan {
+                kind: kind.into(),
+                entity_set: Some(set.into()),
+                subtract_entity_set: sub.map(|s| s.to_string()),
+                group_by: group.iter().map(|s| s.to_string()).collect(),
+                metrics: vec![MetricSpec { field: "DocTotal".into(), op: "sum".into(), alias: "Total".into() }],
+                filter: None,
+                time_window: w,
+                clarifying_question: None,
+                summary: "You had a total value of <total> across <count> orders.".into(),
+            }
+        };
+        assert_eq!(
+            title_for(&p("aggregate", "Invoices", Some("CreditNotes"), &[], Some(planner::TimeWindow::LastQuarter))),
+            "Net sales last quarter"
+        );
+        assert_eq!(title_for(&p("count", "EmployeesInfo", None, &[], None)), "Number of employees");
+        assert_eq!(
+            title_for(&p("aggregate", "Invoices", None, &["DocDate"], Some(planner::TimeWindow::ThisMonth))),
+            "Sales by month this month"
+        );
+        assert_eq!(title_for(&p("aggregate", "Orders", None, &["CardCode"], None)), "Top sales orders");
     }
 
     #[test]
@@ -939,49 +665,16 @@ mod tests {
     }
 
     #[test]
-    fn a_clarify_answer_carries_the_question() {
+    fn a_clarify_plan_carries_the_question() {
         let plan = Plan {
             kind: "clarify".into(),
-            entity_set: None,
-            subtract_entity_set: None,
-            group_by: vec![],
-            metrics: vec![],
-            filter: None,
-            time_window: None,
             clarifying_question: Some("Which period?".into()),
             summary: "Need a period.".into(),
+            ..Default::default()
         };
         let a = clarify_answer(&plan);
         assert_eq!(a.kind, "clarify");
         assert_eq!(a.clarifying_question.as_deref(), Some("Which period?"));
         assert_eq!(a.source, "no query run");
-    }
-
-    #[test]
-    fn date_range_is_inclusive_on_the_docdate_string() {
-        // The filter is a string comparison on YYYY-MM-DD, which sorts correctly.
-        let rows = vec![
-            serde_json::json!({ "DocDate": "2025-01-15", "DocTotal": 1.0 }),
-            serde_json::json!({ "DocDate": "2025-02-15", "DocTotal": 2.0 }),
-            serde_json::json!({ "DocDate": "2025-03-15", "DocTotal": 3.0 }),
-        ];
-        let range = Some(("2025-02-01".to_string(), "2025-02-28".to_string()));
-        let (start, end) = range.as_ref().unwrap();
-        // fetch_rows is async; the filtering logic is inline here for the test.
-        let kept: Vec<_> = rows.iter().filter(|r| {
-            let date = r.get("DocDate").and_then(Value::as_str).unwrap_or("");
-            date.is_empty() || (date >= start.as_str() && date <= end.as_str())
-        }).collect();
-        assert_eq!(kept.len(), 1);
-    }
-
-    #[test]
-    fn default_settings_fallback_is_deterministic() {
-        // With no SAP binding configured, the planner is unavailable and ask()
-        // falls back to the deterministic intents. This must still produce a
-        // result or a warm greeting, never a panic.
-        let s = Settings::default();
-        let _ = s;
-        assert!(!HELP.is_empty());
     }
 }

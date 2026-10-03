@@ -158,6 +158,8 @@ export interface Settings {
   customBaseUrl: string;
   /** Master switch for the pill row. */
   pillsVisible: boolean;
+  /** Pill focused on launch. Empty means "decide at runtime". */
+  defaultAgent: string;
   /** Prefixed flags: `pill.<id>`, `integration.<id>`, `feature.<name>`. */
   features: Record<string, boolean>;
 }
@@ -179,6 +181,7 @@ export const DEFAULT_SETTINGS: Settings = {
   model: "claude-opus-5",
   customBaseUrl: "",
   pillsVisible: true,
+  defaultAgent: "",
   features: {},
 };
 
@@ -272,11 +275,6 @@ class AppState {
   /** Points the island chat at an opencode session (null clears it). */
   setChatTarget(target: ChatTarget | null) {
     const changed = !sameTarget(this.chatTarget, target);
-    // Leaving the ERP clears any clarifying turn in flight, so a later question
-    // cannot be answered with stale context.
-    if (this.chatTarget?.kind === "sapb1" && target?.kind !== "sapb1") {
-      void Bridge.sapB1Reset();
-    }
     this.chatTarget = target;
     this.chatSuggestions = [];
     // One log, one destination: answers from the chat provider and answers from
@@ -375,7 +373,13 @@ class AppState {
     }
 
     // opencode: declared while its plugin is installed, so its sessions stay
-    // discoverable without pretending to be the Claude Code hook.
+    // discoverable without pretending to be the Claude Code hook. Dedupe so a
+    // stale task can never sit beside the declared one.
+    const opencodes = this.tasks.filter((t) => t.id === OPENCODE_AGENT.id);
+    if (opencodes.length > 1) {
+      const keep = this.tasks.findIndex((t) => t.id === OPENCODE_AGENT.id);
+      this.tasks = this.tasks.filter((t, i) => t.id !== OPENCODE_AGENT.id || i === keep);
+    }
     const oidx = this.tasks.findIndex((t) => t.id === OPENCODE_AGENT.id);
     const opencodeOn = this.opencodeInstalled && this.pillOn(OPENCODE_AGENT.id);
     if (opencodeOn && oidx < 0) this.tasks.push({ ...OPENCODE_AGENT, steps: [] });
@@ -397,9 +401,22 @@ class AppState {
       // both known integrations → declaration order
       return order.indexOf(a.id) - order.indexOf(b.id);
     });
-    if (!this.focusId) this.focusId = "integration_claude";
+    // Focus the configured default pill; otherwise SAP Harness when it is
+    // present, so the ERP is the default rather than the unused Claude Code pill.
+    if (!this.focusId || !this.tasks.some((t) => t.id === this.focusId)) {
+      this.focusId = this.defaultFocusId();
+    }
     this.syncCompact();
     this.notify();
+  }
+
+  /** The pill focused on launch: the user's choice, else SAP Harness when it is
+   *  shown, else the first pill. */
+  private defaultFocusId(): string {
+    const chosen = this.settings.defaultAgent;
+    if (chosen && this.tasks.some((t) => t.id === chosen)) return chosen;
+    if (this.tasks.some((t) => t.id === "integration_sapb1")) return "integration_sapb1";
+    return this.tasks[0]?.id ?? "integration_claude";
   }
 
   /** The island window shrinks to a single centred pill when no pill row shows.

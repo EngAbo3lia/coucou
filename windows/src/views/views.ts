@@ -269,7 +269,10 @@ function buildOverview(actions: ViewActions): ViewHost {
 }
 
 function buildPill(task: AgentTask, actions: ViewActions): HTMLElement {
+  // The opencode pill is a first-class provider, not a project session, so it
+  // never shows a project label ("Opencode · coucou" was the stale-looking one).
   const label = task.id === "integration_claude" ? "VS Code"
+    : task.id === "agent_opencode" ? task.name
     : task.projectLabel ? `${task.name} · ${task.projectLabel}` : task.name;
   const canvas = createMiniBot(task, 24);
   const pill = h(

@@ -50,8 +50,16 @@ function toggle(on: boolean, onChange: (v: boolean) => void): HTMLElement {
   return el;
 }
 
-function statusDot(ok: boolean): HTMLElement {
-  return h("i", { class: "dot", style: `background:${ok ? "#22c55e" : "#f4505e"}` });
+/**
+ * A status dot. "off" is neutral gray, not red: a service the user simply has
+ * not set up (Claude Code while they use SAP) must never look like an error.
+ * Red is reserved for a thing that is expected to work but is broken.
+ */
+type DotState = "ok" | "off" | "error";
+function statusDot(state: DotState | boolean): HTMLElement {
+  const s: DotState = typeof state === "boolean" ? (state ? "ok" : "off") : state;
+  const color = s === "ok" ? "#22c55e" : s === "error" ? "#f4505e" : "#6b7079";
+  return h("i", { class: "dot", style: `background:${color}` });
 }
 
 function modelDisplay(m: ModelEntry): string {
@@ -128,11 +136,11 @@ function agentsPage(): HTMLElement {
   const host = h("div", { style: "display:flex;flex-direction:column;gap:12px" });
   body.append(host);
 
-  const agents: { id: string; name: string }[] = [
-    { id: "integration_claude", name: "Claude Code (display only)" },
-    { id: "integration_sapb1", name: "SAP Harness" },
-    { id: "integration_opencode", name: "Opencode" },
-    { id: "chat", name: "Chat" },
+const agents: { id: string; name: string; pill: boolean }[] = [
+    { id: "integration_sapb1", name: "SAP Harness", pill: true },
+    { id: "agent_opencode", name: "Opencode", pill: true },
+    { id: "integration_claude", name: "Claude Code (display only)", pill: true },
+    { id: "chat", name: "Chat", pill: false },
   ];
 
   function draw() {
@@ -158,12 +166,25 @@ function agentsPage(): HTMLElement {
         setBinding(agent.id, providerSelect.value, modelSelect.value);
       });
 
-      host.append(
-        group(agent.name,
-          row("Provider", providerSelect),
-          row("Model", modelSelect),
-        ),
-      );
+      const controls: HTMLElement[] = [row("Provider", providerSelect), row("Model", modelSelect)];
+      if (agent.pill) {
+        // (a) whether the pill is shown at all — the launch default.
+        const shown = toggle(settings.features[`pill.${agent.id}`] !== false, (v) => {
+          settings.features = { ...settings.features, [`pill.${agent.id}`]: v };
+          void save();
+        });
+        // (b) which pill is focused first.
+        const isDefault = settings.defaultAgent === agent.id;
+        const defBtn = h("button", { class: isDefault ? "toggle-pill on" : "toggle-pill", text: isDefault ? "Default" : "Make default" });
+        defBtn.addEventListener("click", () => {
+          settings.defaultAgent = settings.defaultAgent === agent.id ? "" : agent.id;
+          void save();
+          draw();
+        });
+        controls.push(row("Show pill", shown), row("On launch", defBtn));
+      }
+
+      host.append(group(agent.name, ...controls));
     }
   }
 
@@ -190,18 +211,28 @@ function agentsPage(): HTMLElement {
 
 let modelCatalogCache: Record<string, ModelEntry[]> = {};
 let providerConfigs: ProviderConfigInfo[] = [];
+let loadingProviders = new Set<string>();
+/** The models page registers a redraw so an auto-refresh refills the table. */
+let redrawCatalog: (() => void) | null = null;
 
 async function loadProviderConfigs() {
   providerConfigs = (await Bridge.providerConfigs()) ?? [];
 }
 
 async function refreshCatalogFor(provider: string): Promise<void> {
+  loadingProviders.add(provider);
+  redrawCatalog?.();
   try {
     const list = (await Bridge.modelRefresh(provider)) ?? [];
     modelCatalogCache[provider] = list;
   } catch {
     // Keep whatever was cached; the models page shows the error next to the row.
+  } finally {
+    loadingProviders.delete(provider);
   }
+  // Without this the table stays "No models yet" until the user changes
+  // something, because nothing re-rendered after the fetch.
+  redrawCatalog?.();
 }
 
 function modelsPage(): HTMLElement {
@@ -254,8 +285,14 @@ function modelsPage(): HTMLElement {
       type: "password", placeholder: provider.hasKey ? "••••••••  (stored)" : "paste your key",
       autocomplete: "off", spellcheck: "false", style: "flex:1 1 auto;min-width:0",
     }) as HTMLInputElement;
-    const keySave = h("button", { class: "primary", text: "Save" });
-    const keyHint = hint(provider.hasKey ? "Stored in the Credential Manager." : "No key yet.", provider.hasKey ? undefined : "#f5a524");
+const keySave = h("button", { class: "primary", text: "Save" });
+    const isActive = settings.provider === provider.id;
+    const keyHint = provider.hasKey
+      ? hint("Stored in the Credential Manager.")
+      : hint(
+          isActive ? "No key yet — this is the backend the chat uses." : "No key yet.",
+          isActive ? "#f5a524" : undefined,
+        );
     keySave.addEventListener("click", async () => {
       const v = keyInput.value.trim();
       if (!v) return;
@@ -331,8 +368,10 @@ function modelsPage(): HTMLElement {
     refresh.addEventListener("click", () => void doRefresh());
     right.append(h("div", { class: "row" }, h("label", { text: "Models" }), refresh, refreshStatus));
 
-    const list = modelCatalogCache[provider.id] ?? [];
-    if (list.length === 0) {
+const list = modelCatalogCache[provider.id] ?? [];
+    if (list.length === 0 && loadingProviders.has(provider.id)) {
+      table.append(hint("Loading models…"));
+    } else if (list.length === 0) {
       table.append(hint("No models yet. Click Refresh to fetch the live list."));
     } else {
       const header = h("div", { class: "model-row head" },
@@ -435,8 +474,9 @@ function modelsPage(): HTMLElement {
     return "—";
   }
 
-  drawProviders();
+drawProviders();
   drawCatalog();
+  redrawCatalog = () => { if (page === "models") drawCatalog(); };
   for (const p of providerConfigs) void refreshCatalogFor(p.id);
   return body;
 }
@@ -466,15 +506,23 @@ function integrationsPage(): HTMLElement {
   const host = h("div", { style: "display:flex;flex-direction:column;gap:12px" });
   body.append(host);
 
-  // Claude Code hooks.
-  host.append(group("Claude Code",
-    hint(hookStatus.installed
-      ? "Hooked into your Claude Code sessions. Tool calls, questions and permission requests show in the island."
-      : "Install the hooks to see your Claude Code sessions in the island."),
-    row("settings.json", h("span", { class: "path", text: hookStatus.settingsPath })),
-    row("Relay", h("span", { class: "path", text: hookStatus.hookPath }), statusDot(hookStatus.hookReady)),
-    hookActions(),
-  ));
+// Claude Code hooks. Neutral when simply not set up — the user may be on SAP,
+  // not VS Code — and red only when installed but broken.
+  const hookState: DotState = hookStatus.installed ? (hookStatus.hookReady ? "ok" : "error") : "off";
+  host.append(
+    h("section", { class: "group" },
+      h("h3", { style: "display:flex;align-items:center;gap:8px" },
+        statusDot(hookState), h("span", { text: "Claude Code" })),
+      hint(hookStatus.installed
+        ? (hookStatus.hookReady
+          ? "Hooked into your Claude Code sessions. Tool calls, questions and permission requests show in the island."
+          : "Hooks are installed but the relay is missing. Reinstall to fix it.")
+        : "Not set up. Claude Code hooks are only needed if you use Claude Code or VS Code; SAP Harness works without them."),
+      row("settings.json", h("span", { class: "path", text: hookStatus.settingsPath })),
+      row("Relay", h("span", { class: "path", text: hookStatus.hookPath }), statusDot(hookState)),
+      hookActions(),
+    ),
+  );
 
   // Opencode.
   host.append(group("Opencode", opencodeRows()));
@@ -611,12 +659,13 @@ function dialog(content: HTMLElement) {
 }
 
 function loadPresence(def: typeof OTHER_INTEGRATIONS[number], present: Record<string, boolean>, host: HTMLElement) {
-  void (async () => {
+void (async () => {
     for (const f of def.fields) present[f.key] = (await Bridge.secretPresent(f.key)) ?? false;
-    const sw = h("button", { class: settings.activeIntegrations.includes(def.id) ? "switch on" : "switch" });
+    const enabled = settings.features[`integration.${def.id}`] !== false;
+    const sw = h("button", { class: enabled ? "switch on" : "switch", title: "Turn this integration on or off" });
     sw.addEventListener("click", () => {
-      const on = settings.activeIntegrations.includes(def.id);
-      settings.activeIntegrations = on ? settings.activeIntegrations.filter((x) => x !== def.id) : [...settings.activeIntegrations, def.id];
+      const on = sw.classList.contains("on");
+      settings.features = { ...settings.features, [`integration.${def.id}`]: !on };
       sw.classList.toggle("on", !on);
       void save();
     });
@@ -756,9 +805,10 @@ async function main() {
     settings = { ...DEFAULT_SETTINGS, ...boot.settings };
     version = boot.version;
   }
-  hookStatus = (await Bridge.hooksStatus()) ?? hookStatus;
+hookStatus = (await Bridge.hooksStatus()) ?? hookStatus;
   opencode = (await Bridge.openCodeStatus()) ?? opencode;
   await loadProviderPresets();
+  await loadProviderConfigs();
 
   const nav = h("nav", { class: "settings-nav" });
   for (const p of PAGES) {

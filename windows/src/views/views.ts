@@ -69,6 +69,23 @@ function agentWho(task: AgentTask | null, label: string): HTMLElement {
   return row;
 }
 
+/** Who a pill belongs to. Never assume Claude Code: an agent pill is not one. */
+export function agentLabel(task: AgentTask | null): string {
+  if (!task) return "Claude Code";
+  if (task.id === "integration_claude") return "Claude Code";
+  if (task.source === "n8n") return "n8n";
+  return task.name;
+}
+
+/** Primary button wording for the focused agent — "Open terminal" only fits n8n. */
+export function openActionLabel(task: AgentTask | null): string {
+  if (!task) return "Open";
+  if (task.source === "agent") return `Continue in ${task.name}`;
+  if (task.id === "integration_claude") return "Open in VS Code";
+  if (task.source === "n8n") return "Open in n8n";
+  return "Open";
+}
+
 function stack(padLeft: number, padRight: number, ...children: Node[]): HTMLElement {
   const el = h("div", { class: "stack" }, ...children);
   el.style.padding = `4px ${padRight}px 4px ${padLeft}px`;
@@ -188,7 +205,7 @@ function buildOverview(actions: ViewActions): ViewHost {
         who.append(
           dot(task.color, 7),
           h("span", { class: "name", text: task.name }),
-          h("span", { class: "tool", text: task.source === "claudeCode" ? "Claude Code" : "n8n" }),
+          h("span", { class: "tool", text: agentLabel(task) }),
         );
         if (task.steps.length > 1) {
           who.append(h("span", {
@@ -227,7 +244,8 @@ function buildOverview(actions: ViewActions): ViewHost {
 }
 
 function buildPill(task: AgentTask, actions: ViewActions): HTMLElement {
-  const label = task.id === "integration_claude" ? "VS Code" : task.name;
+  const label = task.id === "integration_claude" ? "VS Code"
+    : task.projectLabel ? `${task.name} · ${task.projectLabel}` : task.name;
   const canvas = createMiniBot(task, 24);
   const pill = h(
     "div",
@@ -328,7 +346,7 @@ function buildQuestion(): ViewHost {
     el,
     sync() {
       clear(who);
-      who.append(agentWho(State.focusTask, "Claude Code is asking a question"));
+      who.append(agentWho(State.focusTask, `${agentLabel(State.focusTask)} is asking a question`));
       const task = State.focusTask;
       title.textContent = task?.steps.at(-1) ?? "Claude needs an answer.";
       clear(row);
@@ -353,7 +371,7 @@ function buildError(actions: ViewActions): ViewHost {
     sync() {
       const task = State.focusTask;
       clear(who);
-      who.append(agentWho(task, task?.source === "n8n" ? "n8n" : "Claude Code"));
+      who.append(agentWho(task, task?.source === "n8n" ? "n8n" : agentLabel(task)));
       title.textContent = task?.source === "n8n" ? "Workflow stopped." : "Session stopped on an error.";
       detail.textContent = task?.steps.at(-1) ?? "No detail available.";
     },
@@ -365,17 +383,20 @@ function buildError(actions: ViewActions): ViewHost {
 function buildFinished(actions: ViewActions): ViewHost {
   const who = h("div");
   const title = h("div", { class: "title" });
+  const openBtn = btn("Open terminal", "primary", () => actions.openTerminal());
   const row = h("div", { class: "actions" },
-    btn("Open terminal", "primary", () => actions.openTerminal()),
+    openBtn,
     btn("OK", "secondary", () => actions.collapse()),
   );
   const el = h("div", { class: "view" }, card("green", stack(116, 16, who, title, row)));
   return {
     el,
     sync() {
+      const task = State.focusTask;
       clear(who);
-      who.append(agentWho(State.focusTask, "Claude Code finished"));
-      title.textContent = State.focusTask?.steps.at(-1) ?? "Session finished";
+      who.append(agentWho(task, `${agentLabel(task)} finished`));
+      title.textContent = task?.steps.at(-1) ?? "Session finished";
+      (openBtn.firstChild as HTMLElement).textContent = openActionLabel(task);
     },
   };
 }

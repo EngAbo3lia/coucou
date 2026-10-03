@@ -80,6 +80,11 @@ export const Bridge = {
   /** Copies Coucou's plugin into the opencode config; returns a backup path. */
   openCodeInstall: () => callOrThrow<string>("opencode_install"),
   openCodeUninstall: () => callOrThrow<void>("opencode_uninstall"),
+  /** Recent sessions, newest first, for the sessions card. */
+  opencodeSessions: (limit = 10) => callOrThrow<OpencodeSession[]>("opencode_sessions", { limit }),
+  /** Focus a running session's window, or open it in a new terminal. */
+  opencodeContinue: (sessionId: string, directory: string) =>
+    callOrThrow<boolean>("opencode_continue", { sessionId, directory }),
 
   approvalDecision: (requestId: string, decision: "allow" | "deny") =>
     call<void>("approval_decision", { requestId, decision }),
@@ -120,6 +125,17 @@ export interface OpenCodeStatus {
   upToDate: boolean;
   pluginPath: string;
   configDir: string;
+}
+
+/** One opencode session from `opencode session list --format json`. */
+export interface OpencodeSession {
+  id: string;
+  title: string;
+  directory: string;
+  updated: number;
+  created: number;
+  /** True when the plugin reported this session over the relay right now. */
+  live: boolean;
 }
 
 export interface ProviderInfo {

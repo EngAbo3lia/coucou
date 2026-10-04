@@ -4,6 +4,11 @@
 // Regenerate against the customer's own server; the raw metadata is never
 // committed. 460 entity sets, 427 described types.
 
+/// The SAP Business One version this snapshot was generated from, taken from
+/// the login response. The schema is only stale when the server reports a
+/// different version, so a refresh compares this instead of regenerating blind.
+pub const SAP_VERSION: &str = "1000340";
+
 pub struct EntitySet {
     pub name: &'static str,
     pub entity_type: &'static str,

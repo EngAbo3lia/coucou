@@ -12,10 +12,11 @@
 //! assistant asks rather than guessing, which is the whole point of the change.
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use super::catalogue;
 use super::documents;
+use super::entities;
 use super::query;
 use crate::providers::{self, ApiStyle};
 use crate::settings::Settings;
@@ -100,6 +101,12 @@ pub enum PlanKind {
     Create,
     /// Copy a source document into its target (order -> invoice).
     Copy,
+    /// Receive stock (a goods receipt) for an item.
+    Receive,
+    /// Create an item.
+    NewItem,
+    /// Create a business partner.
+    NewPartner,
     /// Just reply with `summary` — a welcome, a general answer, a non-data reply.
     Answer,
     /// Ambiguous: needs the user to answer `clarifying_question`.
@@ -127,6 +134,9 @@ pub struct Plan {
     pub doc_date: Option<String>,
     /// For kind "create": the lines to post.
     pub lines: Vec<LineSpec>,
+    /// For "receive", "new_item" and "new_partner": the entity's header fields,
+    /// keyed by their Service Layer name (`ItemCode`, `CardName`, `DocDate`).
+    pub values: Map<String, Value>,
     /// Present when kind is "clarify".
     pub clarifying_question: Option<String>,
     /// A one-line human description, shown as the "what I'll do" bubble. For
@@ -143,6 +153,9 @@ impl Plan {
             "detail" => PlanKind::Detail,
             "create" => PlanKind::Create,
             "copy" => PlanKind::Copy,
+            "receive" => PlanKind::Receive,
+            "new_item" => PlanKind::NewItem,
+            "new_partner" => PlanKind::NewPartner,
             "answer" => PlanKind::Answer,
             _ => PlanKind::Clarify,
         }
@@ -205,6 +218,21 @@ impl Plan {
                 }
                 if !(l.quantity > 0.0) {
                     return Err("Quantity must be positive.".into());
+                }
+            }
+            return Ok(());
+        }
+        // A master-data or inventory write: the set must be one the entity
+        // registry knows, and a goods receipt also needs its lines.
+        if matches!(self.parsed_kind(), PlanKind::Receive | PlanKind::NewItem | PlanKind::NewPartner) {
+            let set = self.entity_set.as_deref().ok_or("No entity set.")?;
+            let entity = entities::find(set)
+                .ok_or_else(|| format!("{set} is not an entity I can create."))?;
+            if entity.needs_lines {
+                for l in &self.lines {
+                    if l.item_code.trim().is_empty() || !(l.quantity > 0.0) {
+                        return Err("Every line needs an item and a positive quantity.".into());
+                    }
                 }
             }
             return Ok(());
@@ -328,6 +356,7 @@ The JSON shape:\n\
   \"cardCode\": \"C0001\" | null,\n\
   \"docDate\": \"2026-10-04\" | null,\n\
   \"lines\": [{\"itemCode\": \"A00001\", \"quantity\": 2, \"price\": 100}] | null,\n\
+  \"values\": {\"ItemCode\": \"A00001\", \"ItemName\": \"Printer\", \"DocDate\": \"2026-08-01\", \"WarehouseCode\": \"01\"} | null,\n\
   \"clarifyingQuestion\": null | \"Which period — this quarter, last quarter, or all time?\",\n\
   \"summary\": \"one line for the user, in plain language\"\n\
 }\n\n\
@@ -351,6 +380,17 @@ Rules:\n\
 - \"copy\" = copy a source document into its twin (Orders -> Invoices,\n\
   PurchaseOrders -> PurchaseInvoices). entitySet names the source; filter DocNum\n\
   eq names the document to copy. The app shows a confirmation before posting.\n\
+- \"receive\" = receive stock (a goods receipt) for an item, so a later document can\n\
+  be posted against it. entitySet is \"InventoryGenEntries\"; lines name the item and\n\
+  quantity; values may set DocDate and WarehouseCode. Use it when the user says they\n\
+  have no stock, or to fix a \"negative inventory\" refusal.\n\
+- \"new_item\" = create an item. entitySet is \"Items\"; values must carry ItemCode and\n\
+  ItemName. Use it when the user names an item that does not exist yet.\n\
+- \"new_partner\" = create a customer or supplier. entitySet is \"BusinessPartners\";\n\
+  values carry CardCode, CardName, CardType (cCustomer or cSupplier), Country,\n\
+  Currency and BillToState. Use it when a document fails because the partner is missing.\n\
+- For \"receive\", \"new_item\" and \"new_partner\" the app opens a form prefilled from\n\
+  values, so put your best guess there and let the user correct it.\n\
 - If the question needs a time window or a choice and none is given, set kind to \"clarify\" and\n\
   put the question in clarifyingQuestion. Never guess a period.\n\
 - Use timeWindow for the named periods (this_quarter, last_year, last_30_days…).\n\
@@ -600,6 +640,7 @@ fn plan_from_value(v: &Value) -> Plan {
         card_code: v.get("cardCode").and_then(as_string),
         doc_date: v.get("docDate").and_then(as_string),
         lines: v.get("lines").map(as_lines).unwrap_or_default(),
+        values: v.get("values").and_then(Value::as_object).cloned().unwrap_or_default(),
         clarifying_question: v.get("clarifyingQuestion").and_then(as_string),
         summary: v.get("summary").and_then(as_string).unwrap_or_default(),
     }
@@ -625,6 +666,7 @@ mod tests {
             card_code: None,
             doc_date: None,
             lines: vec![],
+            values: Default::default(),
             clarifying_question: None,
             summary: "Sum Invoices by month for last quarter.".into(),
         }
@@ -758,6 +800,7 @@ mod tests {
             card_code: None,
             doc_date: None,
             lines: vec![],
+            values: Default::default(),
             clarifying_question: Some("Which period?".into()),
             summary: "Need a period.".into(),
         };

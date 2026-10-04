@@ -20,6 +20,7 @@ use serde_json::Value;
 use super::catalogue;
 use super::dates;
 use super::documents;
+use super::entities;
 use super::planner::{self, ChatTurn, FilterSpec, Plan, PlanKind};
 use super::query;
 use super::transport::{self, Credentials};
@@ -165,6 +166,7 @@ async fn execute(c: &Credentials, plan: &Plan) -> Result<Answer, String> {
         PlanKind::Detail => detail_plan(c, plan, range).await,
         PlanKind::Create => create_plan(c, plan).await,
         PlanKind::Copy => copy_plan(c, plan).await,
+        PlanKind::Receive | PlanKind::NewItem | PlanKind::NewPartner => Ok(entity_plan(plan)?),
         PlanKind::Answer => Ok(answer_reply(plan)),
         PlanKind::Clarify => Err("The plan still needs a clarifying answer.".into()),
     }
@@ -669,6 +671,64 @@ async fn create_plan(_c: &Credentials, plan: &Plan) -> Result<Answer, String> {
     })
 }
 
+/// Builds the confirm form for a master-data or inventory write. Every field the
+/// entity declares is rendered as an input, prefilled from the plan, so the user
+/// completes or corrects it before anything posts.
+fn entity_plan(plan: &Plan) -> Result<Answer, String> {
+    let set = plan.entity_set.as_deref().unwrap_or("");
+    let entity = entities::find(set)
+        .ok_or_else(|| format!("{set} is not an entity I can create."))?;
+
+    let fields: Vec<Value> = entity
+        .fields
+        .iter()
+        .map(|f| {
+            let value = plan
+                .values
+                .get(f.key)
+                .and_then(Value::as_str)
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or(f.default);
+            serde_json::json!({
+                "key": f.key,
+                "label": f.label,
+                "kind": f.kind,
+                "required": f.required,
+                "value": value,
+                "options": f.options,
+            })
+        })
+        .collect();
+
+    let lines: Vec<Value> = plan
+        .lines
+        .iter()
+        .map(|l| {
+            serde_json::json!({
+                "itemCode": l.item_code,
+                "quantity": l.quantity,
+                "price": l.price,
+            })
+        })
+        .collect();
+
+    let spec = serde_json::json!({ "set": set, "fields": fields, "lines": lines });
+    let title = format!("Create {}", entity.name);
+    let text = format!(
+        "{}\n\nFill in the fields, then confirm. It posts to the test company.",
+        if plan.summary.trim().is_empty() { &title } else { plan.summary.trim() }
+    );
+    Ok(Answer {
+        title: title.clone(),
+        text,
+        kind: "confirm".into(),
+        plan: Some(title),
+        source: "preview — not posted".into(),
+        payload: Some(spec),
+        ..Answer::default()
+    })
+}
+
 /// Copies a source document (order) into its twin (invoice): fetch the source,
 /// map its card and lines, and return a preview. Nothing is posted here.
 async fn copy_plan(c: &Credentials, plan: &Plan) -> Result<Answer, String> {
@@ -968,6 +1028,7 @@ mod tests {
                 card_code: None,
                 doc_date: None,
                 lines: vec![],
+                values: Default::default(),
                 clarifying_question: None,
                 summary: "You had a total value of <total> across <count> orders.".into(),
             }
@@ -1091,6 +1152,33 @@ mod tests {
             // assert beyond the absence of a panic.
             Ok(v) => println!("C20000 is now usable, DocEntry={}", v["DocEntry"]),
         }
+    }
+
+    /// Drives the entity write path: create an item, then receive stock for it
+    /// through `write_entity`, the same function the confirm form calls.
+    /// Creates an item and a goods receipt on the test company.
+    #[test]
+    #[ignore = "creates an item and a goods receipt on the test company"]
+    fn live_entity_write_creates_item_then_receipt() {
+        let c = super::super::credentials_from_secrets().expect("SAP credentials");
+        let code = "DEMO-W01";
+
+        let item_values = serde_json::json!({
+            "ItemCode": code, "ItemName": "Written item", "ItemsGroupCode": "100"
+        });
+        match tauri::async_runtime::block_on(super::super::write_entity(&c, "Items", &item_values, &serde_json::json!([]))) {
+            Ok(_) => println!("item {code} created"),
+            // A rerun finds it and that is fine; any other error is not.
+            Err(e) if e.contains("already") || e.contains("exists") => println!("item {code} already there"),
+            Err(e) => panic!("item create failed: {e}"),
+        }
+
+        let receipt_values = serde_json::json!({ "DocDate": "2026-08-01", "WarehouseCode": "01" });
+        let lines = serde_json::json!([{ "itemCode": code, "quantity": 500.0, "price": 5.0 }]);
+        let receipt = tauri::async_runtime::block_on(super::super::write_entity(&c, "InventoryGenEntries", &receipt_values, &lines))
+            .unwrap_or_else(|e| panic!("goods receipt failed: {e}"));
+        println!("goods receipt DocEntry={}", receipt["DocEntry"]);
+        assert!(receipt["DocEntry"].as_i64().unwrap_or(0) > 0);
     }
 
     /// Dumps the company's `$metadata` to a file so the catalogue generator can

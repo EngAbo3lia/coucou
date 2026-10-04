@@ -40,6 +40,7 @@ param(
     [string] $Mode = 'offline',
     [string] $Test,
     [switch] $Yes,
+    [switch] $Force,
     [string] $TargetDir = "$env:TEMP\opencode\coucou-target"
 )
 
@@ -181,33 +182,13 @@ function Invoke-Live {
 }
 
 function Invoke-Catalogue {
-    $out = Join-Path $TargetDir 'sap-metadata.xml'
-    $env:SAP_METADATA_OUT = $out
-
-    Write-Step 'Dumping $metadata from the live server'
-    Invoke-Checked 'cargo' @(
-        'test', '--manifest-path', $script:Cargo, '--lib',
-        'live_dump_metadata_for_catalogue', '--', '--ignored', '--nocapture'
-    ) 'The metadata dump'
-
-    if (-not (Test-Path -LiteralPath $out)) {
-        throw "The dump test passed but $out does not exist."
-    }
-
-    Push-Location $script:Root
-    try {
-        Write-Step 'Regenerating the catalogue'
-        Invoke-Checked 'node' @(
-            'scripts/gen-sap-catalogue.mjs', '--in', $out, '--out', $script:Catalogue
-        ) 'The catalogue generator'
-    }
-    finally {
-        Pop-Location
-    }
-
-    Write-Host ''
-    Write-Host "Catalogue written to $script:Catalogue." -ForegroundColor Green
-    Write-Note 'Review the diff before committing: it is generated from your server.'
+    # Delegates to the version-aware refresh: it only regenerates when the
+    # server version differs from the one the catalogue carries.
+    $refresh = Join-Path $PSScriptRoot 'refresh-sap-schema.ps1'
+    Write-Step 'Refreshing the SAP schema catalogue'
+    $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $refresh)
+    if ($Force) { $arguments += '-Force' }
+    Invoke-Checked 'powershell' $arguments 'The schema refresh'
 }
 
 function Invoke-Build {

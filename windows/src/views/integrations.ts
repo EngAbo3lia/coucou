@@ -573,6 +573,15 @@ function sapStatus(
 ): { title: string; detail: string; color: string } {
   if (info?.error) return { title: "Connection failed", detail: info.error, color: "#F4505E" };
   if (probe) {
+    // The login response always carries the version, so a mismatch means
+    // Business One was upgraded and the schema snapshot needs regenerating.
+    if (!probe.schemaCurrent) {
+      return {
+        title: "Schema out of date",
+        detail: `Business One reports ${probe.serverVersion}; the schema was built for ${probe.schemaVersion}. Refresh the catalogue.`,
+        color: "#f5a524",
+      };
+    }
     if (probe.ready) {
       return {
         title: "Connected",

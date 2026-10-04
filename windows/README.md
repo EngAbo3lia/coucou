@@ -138,16 +138,23 @@ problems. It stays on your machine.
 
 ## Testing
 
-Two suites. The offline one always runs; the live one needs a server and writes
-real documents, so it is `#[ignore]`d and you opt in.
+One script runs everything, so the commands here cannot drift from the ones that
+work:
 
 ```powershell
 cd windows
-$env:CARGO_TARGET_DIR = "$env:TEMP\opencode\coucou-target"   # keeps D: free
-
-cargo test --manifest-path src-tauri/Cargo.toml --lib          # offline suite
-npx tsc --noEmit -p tsconfig.json                             # front end
+.\scripts\test.ps1 -Mode offline      # Rust suite + TypeScript check, no server
+.\scripts\test.ps1 -Mode coverage     # just the endpoint sweep, prints the count
+.\scripts\test.ps1 -Mode live -Test live_partner   # one live test, by name
+.\scripts\test.ps1 -Mode catalogue    # refresh catalogue.rs from the live server
+.\scripts\test.ps1 -Mode build        # release build, front end bundled
+.\scripts\test.ps1 -Mode install      # build, replace the installed exe, relaunch
 ```
+
+Run with no arguments for `offline`. `-Mode live` with no `-Test` lists the live
+tests; the one that creates documents asks for confirmation unless you pass
+`-Yes`. The build target directory defaults to `%TEMP%` (the repo drive runs out
+of space); override with `-TargetDir`.
 
 ### Offline suite
 
@@ -165,28 +172,46 @@ That number is generated, not claimed: each case calls the same `query::*` and
 `documents::build_payload` the app uses at runtime. The test asserts the total
 stays at or above 20,000, so a regression that quietly drops endpoints fails.
 
-The catalogue itself is regenerated from your own server, never hand-edited:
+The catalogue is generated from your own server, never hand-edited, and it is
+stamped with the Business One version it was built from:
+
+```rust
+pub const SAP_VERSION: &str = "1000340";
+```
+
+That version comes from the login response, which always carries it. When the
+app connects in the SAP Harness, `probe` logs in, reads the server version, and
+compares it with `SAP_VERSION`. If they differ the card says **Schema out of
+date** (`Business One reports X; the schema was built for Y`) instead of
+pretending the data is current. An unreadable version is treated as current, so
+a hiccup never raises a false alarm. This is dynamic: no script and no restart.
+
+When the card says the schema is stale, refresh it — the script does nothing
+unless the server version actually changed (or you pass `-Force`):
 
 ```powershell
-$env:SAP_METADATA_OUT = "$env:TEMP\sap-metadata.xml"
-cargo test --manifest-path src-tauri/Cargo.toml --lib live_dump_metadata_for_catalogue -- --ignored --nocapture
-node scripts/gen-sap-catalogue.mjs --in $env:SAP_METADATA_OUT --out src-tauri/src/sapb1/catalogue.rs
+.\scripts\refresh-sap-schema.ps1          # same version -> "Nothing to do."
+.\scripts\refresh-sap-schema.ps1 -Force   # regenerate regardless
+```
+
+Under it, the two steps are a `$metadata` dump and the generator:
+
+```powershell
+node scripts/gen-sap-catalogue.mjs --in <metadata.xml> --out src-tauri/src/sapb1/catalogue.rs --version <b1-version>
 ```
 
 ### Live suite
 
 Every live test is `#[ignore]`, reads credentials from the Credential Manager,
-and talks to the company you configured. **They create real documents.** Run one
-at a time, on a test company, and check what it posted:
+and talks to the company you configured. **The sales-cycle test creates real
+documents.** Run one at a time, on a test company, and check what it posted:
 
 ```powershell
-cargo test --manifest-path src-tauri/Cargo.toml --lib sapb1::ask::tests::live_sales_cycle -- --ignored --nocapture
-# order OK DocEntry=1261 DocNum=1261 DocDueDate="2015-02-21T00:00:00Z"
-# invoice OK DocEntry=1409 DocNum=1408
-
-cargo test --manifest-path src-tauri/Cargo.toml --lib sapb1::ask::tests::live_partner -- --ignored --nocapture
-# refused as expected: Maxi-Teq (C20000) has no billing state, so Business One
-# will reject this Sales order. Set a bill-to state on the customer first.
+.\scripts\test.ps1 -Mode live -Test live_sales     # order OK DocEntry=1261 DocDueDate="2015-02-21T00:00:00Z"
+                                                   # invoice OK DocEntry=1409 DocNum=1408
+.\scripts\test.ps1 -Mode live -Test live_partner   # refused as expected: Maxi-Teq (C20000)
+                                                   # has no billing state, so Business One will
+                                                   # reject this Sales order. Set a bill-to state…
 ```
 
 The sales-cycle test goes through `create_document`, the same function the chat
@@ -212,30 +237,36 @@ a fixture, not a default the app applies.
 
 ### Before shipping a change
 
-Full check, then build and install:
-
 ```powershell
-cargo test --manifest-path src-tauri/Cargo.toml --lib   # expect 140 passed, 7 ignored
-npx tsc --noEmit -p tsconfig.json                      # expect no output
-npm run tauri build -- --no-bundle                     # builds coucou.exe only
+.\scripts\test.ps1 -Mode offline   # expect 140 passed, 7 ignored; tsc silent
+.\scripts\test.ps1 -Mode install   # build, quit Coucou, replace it, relaunch
 ```
 
-Then install it. Quit Coucou first — the tray menu, or
-`Get-Process coucou | Stop-Process` — because a running process keeps the old
-image, and then:
-
-```powershell
-Get-Process coucou -ErrorAction SilentlyContinue | Stop-Process
-Copy-Item "$env:TEMP\opencode\coucou-target\release\coucou.exe" "$env:LOCALAPPDATA\Coucou\coucou.exe" -Force
-Start-Process "$env:LOCALAPPDATA\Coucou\coucou.exe"
-```
-
-`coucou-hook.exe` is unchanged unless you touched `hook/`, so it keeps its own
-copy. Confirm the launch by the log line, not by the absence of an error:
+`-Mode install` stops the running app before copying (a running process keeps
+the old image), then confirms the launch by the log line, not by the absence of
+an error:
 
 ```
 %LOCALAPPDATA%\Coucou\coucou.log   →   --- Coucou 0.1.1 started ---
 ```
+
+`coucou-hook.exe` is unchanged unless you touched `hook/`, so it keeps its own
+copy.
+
+### SAP discovery and demo data
+
+Two scripts back the endpoint work. `docs/SAP-B1-ENDPOINTS.md` is the written
+map; these regenerate it and the data behind it:
+
+```powershell
+.\scripts\gen-sap-endpoint-map.ps1            # reads every endpoint, probes write
+.\scripts\seed-demo-data.ps1 -Invoices 100    # demo items, stock, customers, invoices
+```
+
+`gen-sap-endpoint-map.ps1` writes `windows/docs/sap-endpoint-map.csv` (457 rows: read
+status, row count, write error code). Its write probe **POSTs an empty body to
+every endpoint**, so run it on a learning company only. `seed-demo-data.ps1`
+posts real, non-deletable documents, also learning-company only.
 
 The LLM-driven chat path can't be tested without an API key: this account's
 OpenRouter quota is exhausted (`403 Forbidden: Key limit exceeded (total

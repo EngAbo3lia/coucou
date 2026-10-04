@@ -73,7 +73,7 @@ fn forget() {
     }
 }
 
-async fn login(c: &Credentials) -> Result<String, String> {
+async fn login_response(c: &Credentials) -> Result<Value, String> {
     let body = json!({ "CompanyDB": c.company, "UserName": c.user, "Password": c.password });
     let res = client()
         .post(c.url("Login"))
@@ -86,10 +86,29 @@ async fn login(c: &Credentials) -> Result<String, String> {
     if !status.is_success() {
         return Err(error_message(status.as_u16(), &value));
     }
+    Ok(value)
+}
+
+async fn login(c: &Credentials) -> Result<String, String> {
+    let value = login_response(c).await?;
     match value.get("SessionId").and_then(Value::as_str) {
         Some(id) => Ok(id.to_string()),
         None => Err("Login returned no session id".into()),
     }
+}
+
+/// The SAP Business One version the server reports at login. It is always
+/// present in the login response, and it is the tag the generated schema
+/// catalogue is built against: comparing the two is how the app notices the
+/// schema is stale after a Business One upgrade.
+pub async fn login_version(c: &Credentials) -> Result<String, String> {
+    let value = login_response(c).await?;
+    value
+        .get("Version")
+        .and_then(Value::as_str)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| "Login returned no Version".into())
 }
 
 async fn session(c: &Credentials) -> Result<String, String> {

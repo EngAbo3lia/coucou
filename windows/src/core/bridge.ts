@@ -204,6 +204,11 @@ export const Bridge = {
   sapB1CreateDocument: (spec: SapB1DocumentSpec) =>
     callOrThrow<unknown>("sap_b1_create_document", { spec }),
 
+  /** Creates an item, business partner or goods receipt from the field values
+   *  the confirm form collected. Called only after the user confirms. */
+  sapB1WriteEntity: (set: string, values: Record<string, string>, lines: SapB1LineSpec[]) =>
+    callOrThrow<unknown>("sap_b1_write_entity", { set, values, lines }),
+
   /** Tray → Pause. Stops the integration pollers, not just the island. */
   setPaused: (paused: boolean) => call<void>("set_paused", { paused }),
 };
@@ -224,6 +229,12 @@ export interface SapB1Probe {
   sets: SapB1SetProbe[];
   /** True when every report set and every report field exists live. */
   ready: boolean;
+  /** The Business One version the committed schema catalogue was built from. */
+  schemaVersion: string;
+  /** The version the server reported at login. Empty when it could not be read. */
+  serverVersion: string;
+  /** False means Business One was upgraded and the schema snapshot is stale. */
+  schemaCurrent: boolean;
 }
 
 export interface SapB1AnswerRow {
@@ -261,6 +272,26 @@ export interface SapB1DocumentSpec {
   baseType?: number;
 }
 
+/** One header field of an entity form (item, partner, goods receipt). */
+export interface SapB1FieldSpec {
+  key: string;
+  label: string;
+  /** "text" | "number" | "date" | "choice". */
+  kind: string;
+  required: boolean;
+  value: string;
+  /** Allowed values for a "choice" field; empty otherwise. */
+  options: string[];
+}
+
+/** The form for a master-data or inventory write, carried with a confirm
+ *  preview so the app can render exactly the fields the entity needs. */
+export interface SapB1EntitySpec {
+  set: string;
+  fields: SapB1FieldSpec[];
+  lines: SapB1LineSpec[];
+}
+
 /** One prior turn of a conversation, sent to the ERP planner. */
 export interface ChatTurn {
   role: "user" | "assistant";
@@ -285,7 +316,7 @@ export interface SapB1Answer {
   /** The "what I'll do" bubble, shown before a result. */
   plan: string | null;
   /** For kind "confirm": the document spec to post after the user confirms. */
-  payload: SapB1DocumentSpec | null;
+  payload: SapB1DocumentSpec | SapB1EntitySpec | null;
   /** Clickable choices (items/customers) the user can pick in the chat. */
   options: SapB1PickOption[];
   /** The question the assistant needs answered before it can run. */

@@ -28,9 +28,11 @@ mod coverage;
 pub mod dates;
 pub mod doctypes;
 pub mod documents;
+pub mod entities;
 pub mod metadata;
 pub mod planner;
 pub mod query;
+pub mod recovery;
 pub mod transport;
 
 pub use ask::Answer;
@@ -74,13 +76,29 @@ pub struct Probe {
     pub sets: Vec<SetProbe>,
     /// True when every report set and every report field exists live.
     pub ready: bool,
+    /// The Business One version the committed schema catalogue was built from.
+    pub schema_version: String,
+    /// The version the server reported at login. Empty when it could not be read.
+    pub server_version: String,
+    /// True when the catalogue matches the server's version. False means
+    /// Business One was upgraded and the schema snapshot needs regenerating.
+    pub schema_current: bool,
 }
 
 /// Connects and reports what the live server exposes, so a report never assumes
 /// a field the installation does not have.
 pub async fn probe(c: &Credentials) -> Result<Probe, String> {
     let xml = transport::get_text(c, "$metadata").await?;
-    Ok(check(&metadata::parse(&xml)))
+    let mut probe = check(&metadata::parse(&xml));
+    probe.schema_version = catalogue::SAP_VERSION.to_string();
+    // The login response always carries the version. A mismatch against the one
+    // the catalogue was generated from means the snapshot is stale; an unreadable
+    // version is left as "current" so a hiccup never raises a false alarm.
+    if let Ok(server) = transport::login_version(c).await {
+        probe.schema_current = server == catalogue::SAP_VERSION;
+        probe.server_version = server;
+    }
+    Ok(probe)
 }
 
 /// Service Layer credentials from the Credential Manager. The password never
@@ -148,7 +166,58 @@ pub async fn create_document(c: &Credentials, spec: &Value) -> Result<Value, Str
     let doc = documents::Document { doc_type, card_code, doc_date, due_date, lines, base };
     documents::validate(&doc)?;
     let payload = documents::build_payload(&doc);
-    transport::post(c, set, &payload).await
+    // A rejected write is turned into the action it needs — receive stock, set a
+    // billing state, add a rate — instead of the server's opaque string.
+    transport::post(c, set, &payload)
+        .await
+        .map_err(|e| recovery::explain(&doc, &e))
+}
+
+/// Creates a master-data or inventory entity — an item, a business partner, a
+/// goods receipt — from the field values the confirm dialog collected. Called by
+/// the app only after the user confirms; nothing here writes silently.
+pub async fn write_entity(
+    c: &Credentials,
+    set: &str,
+    values: &Value,
+    lines: &Value,
+) -> Result<Value, String> {
+    let entity = entities::find(set)
+        .ok_or_else(|| format!("{set} is not an entity I can create."))?;
+    let values = values.as_object().cloned().unwrap_or_default();
+
+    let missing = entities::required_missing(entity, &values);
+    if !missing.is_empty() {
+        return Err(format!("Fill in {} before posting.", missing.join(", ")));
+    }
+
+    let lines: Vec<documents::Line> = lines
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|l| {
+                    let item_code = l.get("itemCode").and_then(Value::as_str).unwrap_or("").to_string();
+                    (!item_code.is_empty()).then(|| documents::Line {
+                        item_code,
+                        quantity: l.get("quantity").and_then(Value::as_f64).unwrap_or(0.0),
+                        price: l.get("price").and_then(Value::as_f64),
+                        base_line: None,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if entity.needs_lines && lines.is_empty() {
+        return Err(format!("An {} needs at least one line.", entity.name));
+    }
+
+    let payload = entities::build_payload(entity, &values, &lines)?;
+    let card = entities::value_for(&values, "CardCode").unwrap_or("").to_string();
+    let item = lines.first().map(|l| l.item_code.clone()).unwrap_or_default();
+    transport::post(c, set, &payload)
+        .await
+        .map_err(|e| recovery::classify_parts(&card, &item, &e).message())
 }
 
 /// Sales documents this company expects to carry a due date. A purchase order
@@ -229,6 +298,9 @@ fn check(md: &metadata::Metadata) -> Probe {
         type_count: md.types.len(),
         ready: sets.iter().all(|s| s.present && s.missing_fields.is_empty()),
         sets,
+        schema_version: catalogue::SAP_VERSION.to_string(),
+        server_version: String::new(),
+        schema_current: true,
     }
 }
 

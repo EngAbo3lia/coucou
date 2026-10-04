@@ -3,7 +3,7 @@
 
 import { h, svg, clear } from "./dom";
 import { ICONS } from "./icons";
-import { Bridge, type ChatContext, type SapB1Answer, type SapB1DocumentSpec } from "../core/bridge";
+import { Bridge, type ChatContext, type SapB1Answer, type SapB1DocumentSpec, type SapB1EntitySpec, type SapB1LineSpec } from "../core/bridge";
 import { Sound } from "../core/sound";
 import { State, type ChatMessage } from "../core/state";
 import type { ViewHost } from "./views";
@@ -101,18 +101,26 @@ function money(v: number): string {
   return `${neg ? "-" : ""}${grouped}.${cents}`;
 }
 
-/** Asks for an explicit confirm before a document is posted, and lets the user
- *  set each line's quantity and price. No silent create. */
-function confirmDocument(a: SapB1Answer): Promise<SapB1DocumentSpec | null> {
+/** What the confirm dialog resolved to: a document to post, or an entity form
+ *  whose field values are ready, or null when the user cancelled. */
+type ConfirmResult =
+  | { kind: "document"; spec: SapB1DocumentSpec }
+  | { kind: "entity"; set: string; values: Record<string, string>; lines: SapB1LineSpec[] };
+
+/** Asks for an explicit confirm before anything is posted. For a document the
+ *  user sets each line's quantity and price; for an entity (item, partner,
+ *  goods receipt) every field the entity needs is shown as an input. No silent
+ *  create. */
+function confirmDocument(a: SapB1Answer): Promise<ConfirmResult | null> {
   return new Promise((resolve) => {
-    const spec = a.payload;
+    const payload = a.payload;
     const d = h("dialog", { class: "confirm" });
     d.append(h("div", { class: "confirm-title", text: a.title }));
 
     const editors: { qty: HTMLInputElement; price: HTMLInputElement }[] = [];
-    if (spec) {
+    const lineEditors = (lines: SapB1LineSpec[]) => {
       const list = h("div", { class: "confirm-lines" });
-      for (const line of spec.lines) {
+      for (const line of lines) {
         const qty = h("input", {
           class: "confirm-input", type: "number", min: "0", step: "1",
           value: String(line.quantity),
@@ -129,11 +137,66 @@ function confirmDocument(a: SapB1Answer): Promise<SapB1DocumentSpec | null> {
         );
         editors.push({ qty, price });
       }
+      return list;
+    };
+
+    if (payload && "fields" in payload) {
+      // Entity form: one labelled input per field the entity declares.
+      const spec = payload as SapB1EntitySpec;
+      const inputs = new Map<string, HTMLInputElement | HTMLSelectElement>();
+      const form = h("div", { class: "confirm-form" });
+      for (const field of spec.fields) {
+        let control: HTMLInputElement | HTMLSelectElement;
+        if (field.kind === "choice") {
+          const select = h("select", { class: "confirm-input" }) as HTMLSelectElement;
+          for (const option of field.options) {
+            select.append(h("option", { value: option, text: option }));
+          }
+          select.value = field.value;
+          control = select;
+        } else {
+          const type = field.kind === "number" ? "number" : field.kind === "date" ? "date" : "text";
+          control = h("input", { class: "confirm-input", type, value: field.value }) as HTMLInputElement;
+        }
+        form.append(
+          h("label", { class: "confirm-field" },
+            h("span", { class: "confirm-label", text: field.required ? `${field.label} *` : field.label }),
+            control,
+          ),
+        );
+        inputs.set(field.key, control);
+      }
+      d.append(form);
+      if (spec.lines.length) {
+        d.append(
+          h("div", { class: "confirm-cols" },
+            h("span", { text: "Item" }), h("span", { text: "Qty" }), h("span", { text: "Price" }),
+          ),
+          lineEditors(spec.lines),
+        );
+      }
+      const ok = h("button", {
+        class: "confirm-ok", text: "Create",
+        onclick: () => {
+          d.close();
+          const values: Record<string, string> = {};
+          for (const [key, input] of inputs) { values[key] = input.value; }
+          const lines = spec.lines.map((line, i) => ({
+            itemCode: line.itemCode,
+            quantity: Number(editors[i].qty.value) || 0,
+            price: editors[i].price.value.trim() === "" ? null : Number(editors[i].price.value),
+          }));
+          resolve({ kind: "entity", set: spec.set, values, lines });
+        },
+      });
+      d.append(h("div", { class: "confirm-actions" }, cancelButton(d, resolve), ok));
+    } else if (payload) {
+      const spec = payload as SapB1DocumentSpec;
       d.append(
         h("div", { class: "confirm-cols" },
           h("span", { text: "Item" }), h("span", { text: "Qty" }), h("span", { text: "Price" }),
         ),
-        list,
+        lineEditors(spec.lines),
         h("div", { class: "confirm-hint", text: `${spec.cardCode}${spec.docDate ? ` · ${spec.docDate}` : ""}` }),
       );
       if (spec.baseEntry) {
@@ -144,34 +207,39 @@ function confirmDocument(a: SapB1Answer): Promise<SapB1DocumentSpec | null> {
           text: `Copied from document ${spec.baseEntry}. Price and tax come from that document.`,
         }));
       }
+      const ok = h("button", {
+        class: "confirm-ok", text: "Create",
+        onclick: () => {
+          d.close();
+          const lines = spec.lines.map((line, i) => ({
+            itemCode: line.itemCode,
+            quantity: Number(editors[i].qty.value) || 0,
+            price: editors[i].price.value.trim() === "" ? null : Number(editors[i].price.value),
+            // A copy keeps its source line even after the user edits the figures.
+            baseLine: line.baseLine ?? null,
+          }));
+          resolve({ kind: "document", spec: { ...spec, lines } });
+        },
+      });
+      d.append(h("div", { class: "confirm-actions" }, cancelButton(d, resolve), ok));
     } else {
       d.append(h("div", { class: "confirm-body", text: a.text }));
+      d.append(h("div", { class: "confirm-actions" }, cancelButton(d, resolve)));
     }
 
-    const actions = h("div", { class: "confirm-actions" });
-    const cancel = h("button", {
-      class: "confirm-cancel", text: "Cancel",
-      onclick: () => { d.close(); resolve(null); },
-    });
-    const ok = h("button", {
-      class: "confirm-ok", text: "Create",
-      onclick: () => {
-        d.close();
-        if (!spec) { resolve(null); return; }
-        const lines = spec.lines.map((line, i) => ({
-          itemCode: line.itemCode,
-          quantity: Number(editors[i].qty.value) || 0,
-          price: editors[i].price.value.trim() === "" ? null : Number(editors[i].price.value),
-          // A copy keeps its source line even after the user edits the figures.
-          baseLine: line.baseLine ?? null,
-        }));
-        resolve({ ...spec, lines });
-      },
-    });
-    actions.append(cancel, ok);
-    d.append(actions);
     document.body.append(d);
     d.showModal();
+  });
+}
+
+/** The Cancel button, shared by both forms. */
+function cancelButton(
+  d: HTMLDialogElement,
+  resolve: (v: ConfirmResult | null) => void,
+): HTMLButtonElement {
+  return h("button", {
+    class: "confirm-cancel", text: "Cancel",
+    onclick: () => { d.close(); resolve(null); },
   });
 }
 
@@ -303,7 +371,9 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
           State.chatHistory.push({ id: nextId++, role: "assistant", content: answer.text });
           const spec = await confirmDocument(answer);
           if (spec) {
-            const result = await Bridge.sapB1CreateDocument(spec);
+            const result = spec.kind === "entity"
+              ? await Bridge.sapB1WriteEntity(spec.set, spec.values, spec.lines)
+              : await Bridge.sapB1CreateDocument(spec.spec);
             State.chatHistory.push({ id: nextId++, role: "assistant", content: createdMessage(result) });
           }
         } else if (answer.kind === "result") {

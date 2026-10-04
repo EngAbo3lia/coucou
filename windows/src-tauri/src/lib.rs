@@ -647,6 +647,18 @@ async fn sap_b1_create_document(spec: serde_json::Value) -> Result<serde_json::V
     sapb1::create_document(&sapb1::credentials_from_secrets()?, &spec).await
 }
 
+/// Creates a master-data or inventory entity — an item, a partner, a goods
+/// receipt — from the field values the confirm form collected. The app calls it
+/// only after the user confirmed; nothing here writes silently.
+#[tauri::command]
+async fn sap_b1_write_entity(
+    set: String,
+    values: serde_json::Value,
+    lines: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    sapb1::write_entity(&sapb1::credentials_from_secrets()?, &set, &values, &lines).await
+}
+
 /// Lets the island write to the same log as the Rust side.
 #[tauri::command]
 fn log_line(message: String) {
@@ -794,6 +806,7 @@ pub fn run() {
             sap_b1_probe,
             sap_b1_ask,
             sap_b1_create_document,
+            sap_b1_write_entity,
             open_settings_window,
             set_paused,
         ])

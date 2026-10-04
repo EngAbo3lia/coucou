@@ -1,10 +1,83 @@
-//! What the Service Layer will and will not do, and the query strings that come
+﻿//! What the Service Layer will and will not do, and the query strings that come
 //! out of it.
 //!
 //! The rules below were verified against a live FP 3400 server, not read off a
 //! spec. They are the contract a query plan is built on: the planner may only
 //! emit what `CAPABILITIES` marks as working, and must reach for the
 //! `ALTERNATIVES` when it does not.
+
+/// The most rows a single read may pull. A lower-bound guard, not a filter: the
+/// caller still pages or filters when it needs more.
+pub const ROW_CAP: usize = 5000;
+
+/// Builds the read URL for an entity set.
+///
+/// `select` may be empty, in which case the row cap alone is sent: some servers
+/// reject a `$select` naming no field. Field names are validated against the
+/// endpoint catalogue by the caller, so this only has to join them safely.
+pub fn build_list_url(set: &str, select: &[String], top: usize) -> String {
+    if select.is_empty() {
+        return format!("{set}?$top={top}");
+    }
+    format!("{set}?$select={}&$top={top}", select.join(","))
+}
+
+/// Builds the `$count` URL, optionally with an already-rendered filter clause.
+/// The count endpoint is a different path from the list, and takes the filter
+/// as one `?$filter=` argument rather than as part of the collection path.
+pub fn build_count_url(set: &str, filter: &str) -> String {
+    if filter.is_empty() {
+        format!("{set}/$count")
+    } else {
+        format!("{set}/$count?$filter={filter}")
+    }
+}
+
+/// Renders one OData literal, refusing anything that could terminate it and
+/// change the meaning of the query.
+///
+/// Every value the planner or the user supplies reaches the URL through here.
+/// The test is an allowlist, not a denylist: a value is a number, an ISO date,
+/// or a string built only from characters that cannot end a literal or open a
+/// new clause. Injection is impossible by construction, not by escaping.
+pub fn filter_literal(value: &str) -> Result<String, String> {
+    let v = value.trim();
+    if v.is_empty() {
+        return Err("Empty filter value.".into());
+    }
+    // Anything that could close the literal or start a new clause is refused.
+    if v.chars()
+        .any(|c| matches!(c, '\'' | '"' | ';' | '&' | '%' | '$' | '(' | ')' | '\\' | '|'))
+    {
+        return Err(format!("Unsafe filter value {v:?}."));
+    }
+    if is_iso_date(v) {
+        // `datetime'...'`, the form verified against the live server.
+        return Ok(format!("datetime'{v}'"));
+    }
+    if v.parse::<f64>().is_ok() {
+        return Ok(v.to_string());
+    }
+    // A plain string literal (an enum like bost_Open, a status word, a code).
+    if v.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ' ' | '/' | ':' | '@'))
+    {
+        Ok(format!("'{v}'"))
+    } else {
+        Err(format!("Unsafe filter value {v:?}."))
+    }
+}
+
+/// Whether a value is a bare ISO date, `YYYY-MM-DD`, which OData wants as a
+/// `datetime'...'` literal rather than a string.
+fn is_iso_date(v: &str) -> bool {
+    v.len() == 10
+        && v.as_bytes()[4] == b'-'
+        && v.as_bytes()[7] == b'-'
+        && v[..4].bytes().all(|b| b.is_ascii_digit())
+        && v[5..7].bytes().all(|b| b.is_ascii_digit())
+        && v[8..].bytes().all(|b| b.is_ascii_digit())
+}
 
 /// Whether the server accepts a query option.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,7 +131,7 @@ pub const CAPABILITIES: &[Capability] = &[
         option: "$count",
         example: "Invoices/$count?$filter=DocDate ge 2024-01-01",
         support: Support::Works,
-        note: "Exact count, and it does accept $filter — unlike $apply.",
+        note: "Exact count, and it does accept $filter â€” unlike $apply.",
     },
     Capability {
         option: "$expand (single-entity navigation)",

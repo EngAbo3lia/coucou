@@ -203,6 +203,10 @@ export interface SapB1LineSpec {
   itemCode: string;
   quantity: number;
   price: number | null;
+  /** The source line this one copies from, set only on a copy. Sent back
+   *  untouched: Business One reads price, tax and currency from the base
+   *  document, so a copy must not be rebuilt by hand. */
+  baseLine?: number | null;
 }
 
 /** The document spec the planner returns with a create/copy preview, and that
@@ -212,6 +216,10 @@ export interface SapB1DocumentSpec {
   cardCode: string;
   docDate: string | null;
   lines: SapB1LineSpec[];
+  /** Present on a copy: the document the lines come from, with its
+   *  Business One base type (`17` sales order, `540` purchase order). */
+  baseEntry?: number;
+  baseType?: number;
 }
 
 /** One prior turn of a conversation, sent to the ERP planner. */

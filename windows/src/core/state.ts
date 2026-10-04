@@ -451,14 +451,15 @@ class AppState {
   toggleIntegration(id: string) {
     if (id === "integration_claude") return;
     const active = this.settings.activeIntegrations;
-    if (active.includes(id)) {
+    const wasActive = active.includes(id);
+    if (wasActive) {
       this.settings.activeIntegrations = active.filter((x) => x !== id);
       if (this.focusId === id) this.focusId = "integration_claude";
     } else {
       if (active.length >= 4) return;
       this.settings.activeIntegrations = [...active, id];
     }
-    this.settings.features = { ...this.settings.features, [`integration.${id}`]: active.includes(id) };
+    this.settings.features = { ...this.settings.features, [`integration.${id}`]: !wasActive };
     this.loadIntegrationTasks();
     void Bridge.saveSettings(this.settings);
   }

@@ -130,6 +130,14 @@ function confirmDocument(a: SapB1Answer): Promise<SapB1DocumentSpec | null> {
         list,
         h("div", { class: "confirm-hint", text: `${spec.cardCode}${spec.docDate ? ` · ${spec.docDate}` : ""}` }),
       );
+      if (spec.baseEntry) {
+        // On a copy the server reads price, tax and currency from the source
+        // document, so saying so stops a user hunting for a wrong total.
+        d.append(h("div", {
+          class: "confirm-hint",
+          text: `Copied from document ${spec.baseEntry}. Price and tax come from that document.`,
+        }));
+      }
     } else {
       d.append(h("div", { class: "confirm-body", text: a.text }));
     }
@@ -148,6 +156,8 @@ function confirmDocument(a: SapB1Answer): Promise<SapB1DocumentSpec | null> {
           itemCode: line.itemCode,
           quantity: Number(editors[i].qty.value) || 0,
           price: editors[i].price.value.trim() === "" ? null : Number(editors[i].price.value),
+          // A copy keeps its source line even after the user edits the figures.
+          baseLine: line.baseLine ?? null,
         }));
         resolve({ ...spec, lines });
       },

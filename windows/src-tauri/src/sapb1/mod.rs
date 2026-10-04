@@ -24,6 +24,7 @@
 
 pub mod ask;
 pub mod catalogue;
+mod coverage;
 pub mod dates;
 pub mod doctypes;
 pub mod documents;
@@ -32,7 +33,7 @@ pub mod planner;
 pub mod query;
 pub mod transport;
 
-pub use ask::{Answer, AnswerRow};
+pub use ask::Answer;
 
 use serde::Serialize;
 use serde_json::Value;
@@ -121,15 +122,101 @@ pub async fn create_document(c: &Credentials, spec: &Value) -> Result<Value, Str
                     }
                     let quantity = l.get("quantity").and_then(Value::as_f64).unwrap_or(0.0);
                     let price = l.get("price").and_then(Value::as_f64);
-                    Some(documents::Line { item_code, quantity, price })
+                    let base_line = l.get("baseLine").and_then(Value::as_i64);
+                    Some(documents::Line { item_code, quantity, price, base_line })
                 })
                 .collect()
         })
         .unwrap_or_default();
-    let doc = documents::Document { doc_type, card_code, doc_date, lines };
+    // Business One derives the tax extension from the partner, so nothing is
+    // sent for it: supplying one by hand is rejected or silently wrong.
+    //
+    // What it will not do is guess a missing state. A partner with no billing
+    // state makes every document for that partner fail with an opaque
+    // `TaxExtension.BillToState` error, so it is caught here, before the write
+    // and before the user is asked to confirm.
+    if let Some(reason) = partner_state_problem(c, doc_type, &card_code).await {
+        return Err(reason);
+    }
+    // A copy is taken from the document the planner named, so Business One derives
+    // price, tax and currency from the source instead of trusting a rebuild.
+    let base = match (spec.get("baseEntry").and_then(Value::as_i64), spec.get("baseType").and_then(Value::as_i64)) {
+        (Some(entry), Some(base_type)) if entry > 0 => Some(documents::BaseDocument { entry, base_type }),
+        _ => None,
+    };
+    let due_date = doc_type.needs_due_date.then(|| due_date_for(&doc_date));
+    let doc = documents::Document { doc_type, card_code, doc_date, due_date, lines, base };
     documents::validate(&doc)?;
     let payload = documents::build_payload(&doc);
     transport::post(c, set, &payload).await
+}
+
+/// Sales documents this company expects to carry a due date. A purchase order
+/// asks its vendor for payment terms, so the date is optional there.
+fn due_date_for(doc_date: &Option<String>) -> String {
+    match doc_date {
+        Some(d) if d.len() == 10 => {
+            // Thirty days out, without pulling in a date library: shift the day
+            // and let the caller post an explicit date when the user wants one.
+            let (y, m, day) = (
+                d[0..4].parse::<i32>().unwrap_or(2015),
+                d[5..7].parse::<u32>().unwrap_or(1),
+                d[8..10].parse::<u32>().unwrap_or(1),
+            );
+            let last = days_in_month(y, m);
+            if day + 30 <= last {
+                format!("{y:04}-{m:02}-{:02}", day + 30)
+            } else {
+                let next = if m == 12 { 1 } else { m + 1 };
+                let ny = if m == 12 { y + 1 } else { y };
+                format!("{ny:04}-{next:02}-{:02}", day + 30 - last)
+            }
+        }
+        _ => {
+            let (y, m, d) = dates::today_ymd();
+            format!("{y:04}-{m:02}-{d:02}")
+        }
+    }
+}
+
+fn days_in_month(year: i32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+        2 => 28,
+        _ => 30,
+    }
+}
+
+/// Why this partner cannot be used for this document, or `None` when it can.
+///
+/// Only sales documents are checked: a purchase document has no billing state
+/// requirement, and an inventory document has no partner at all.
+async fn partner_state_problem(
+    c: &Credentials,
+    doc_type: &'static documents::DocumentType,
+    card_code: &str,
+) -> Option<String> {
+    if doc_type.cycle != "sales" {
+        return None;
+    }
+    let url = format!(
+        "BusinessPartners?$filter=CardCode eq {}&$select=CardCode,CardName,BillToState&$top=1",
+        query::filter_literal(card_code).ok()?
+    );
+    let found = transport::get(c, &url).await.ok()?;
+    let row = found.get("value")?.as_array()?.first()?;
+    // An unreadable partner is the server's problem to report, not a guess here.
+    let name = row.get("CardName").and_then(Value::as_str).unwrap_or(card_code);
+    match row.get("BillToState").and_then(Value::as_str) {
+        Some(state) if !state.trim().is_empty() => None,
+        _ => Some(format!(
+            "{name} ({card_code}) has no billing state, so Business One will reject this \
+             {}. Set a bill-to state on the customer first.",
+            doc_type.name
+        )),
+    }
 }
 
 fn check(md: &metadata::Metadata) -> Probe {

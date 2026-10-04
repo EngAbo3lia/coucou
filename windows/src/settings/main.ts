@@ -501,7 +501,7 @@ const OTHER_INTEGRATIONS: { id: string; name: string; color: string; fields: { k
 
 function integrationsPage(): HTMLElement {
   const body = h("div", { class: "page" });
-  body.append(h("h2", { text: "Integrations" }), hint("Each integration has a switch to turn it off and a switch to hide its pill. A hidden pill keeps polling; a switched-off one stops."));
+  body.append(h("h2", { text: "Integrations" }), hint("The switch turns the service on or off; pill visibility is set per pill under Pills shown on the Appearance page."));
 
   const host = h("div", { style: "display:flex;flex-direction:column;gap:12px" });
   body.append(host);
@@ -661,7 +661,7 @@ function dialog(content: HTMLElement) {
 function loadPresence(def: typeof OTHER_INTEGRATIONS[number], present: Record<string, boolean>, host: HTMLElement) {
 void (async () => {
     for (const f of def.fields) present[f.key] = (await Bridge.secretPresent(f.key)) ?? false;
-    const enabled = settings.features[`integration.${def.id}`] !== false;
+    const enabled = settings.features[`integration.${def.id}`] ?? settings.activeIntegrations.includes(def.id);
     const sw = h("button", { class: enabled ? "switch on" : "switch", title: "Turn this integration on or off" });
     sw.addEventListener("click", () => {
       const on = sw.classList.contains("on");
@@ -690,9 +690,9 @@ void (async () => {
       });
       rows.append(h("div", { class: "row" }, h("label", { style: "min-width:104px", text: f.label }), input, save, dotEl));
     }
-    host.append(
+host.append(
       group(def.name,
-        row("Pill", sw),
+        row("Active", sw),
         rows,
       ),
     );
@@ -734,7 +734,7 @@ function appearancePage(): HTMLElement {
   const pillDefs = [
     { id: "integration_claude", name: "Claude Code" },
     { id: "integration_sapb1", name: "SAP Harness" },
-    { id: "integration_opencode", name: "Opencode" },
+    { id: "agent_opencode", name: "Opencode" },
     ...OTHER_INTEGRATIONS.map((x) => ({ id: x.id, name: x.name })),
   ];
   const pillList = h("div", { style: "display:flex;flex-direction:column;gap:8px" });

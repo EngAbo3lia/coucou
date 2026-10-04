@@ -7,6 +7,7 @@ import { State, type Settings } from "./core/state";
 import { Island } from "./island/island";
 import { registerHookHandlers } from "./island/hooks";
 import { registerIntegrationHandlers, refreshConfigured } from "./island/integrations";
+import { invalidateSapKeys } from "./views/integrations";
 
 async function main() {
   const root = document.getElementById("root");
@@ -59,6 +60,8 @@ async function main() {
     State.settings = { ...State.settings, ...s };
     island.applySettings();
     State.loadIntegrationTasks();
+    // Credentials may have just been written: the ERP card caches their presence.
+    invalidateSapKeys();
     void refreshConfigured();
   });
 

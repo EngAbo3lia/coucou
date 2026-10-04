@@ -555,6 +555,13 @@ async function loadSapKeys() {
   }
 }
 
+/** Drops the cached key presence so the card re-reads the Credential Manager.
+ *  Called when the Settings window writes settings: without it a card that said
+ *  "Needs credentials" keeps saying it after the credentials were just saved. */
+export function invalidateSapKeys() {
+  sapKeys = null;
+}
+
 /** Writes the card's slice of integration state and repaints. */
 function setSapState(id: string, patch: Partial<IntegrationInfo>) {
   const info = State.integrations[id] ?? { data: {}, error: null, loaded: false, configured: false };
@@ -572,23 +579,15 @@ function sapStatus(
   if (info?.error) return { title: "Connection failed", detail: info.error, color: "#F4505E" };
   if (probe) {
     if (probe.ready) {
-      const bad = probe.sets.filter((s) => !s.present || s.missingFields.length > 0);
-      if (bad.length === 0) {
-        return {
-          title: "Connected",
-          detail: `${probe.entitySetCount} entity sets · ${probe.typeCount} types · all report fields present`,
-          color: "#22C55E",
-        };
-      }
       return {
-        title: "Connected — incomplete",
-        detail: `missing fields in ${bad.map((s) => s.entitySet).join(", ")}`,
-        color: "#f5a524",
+        title: "Connected",
+        detail: "Live data ready — ask about orders, stock or partners.",
+        color: "#22C55E",
       };
     }
     return {
-      title: "Connected — incomplete",
-      detail: `missing: ${probe.sets.filter((s) => !s.present).map((s) => s.entitySet).join(", ")}`,
+      title: "Connected — limited",
+      detail: "The server does not expose every report Coucou needs.",
       color: "#f5a524",
     };
   }

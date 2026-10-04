@@ -17,23 +17,26 @@ pub struct DocumentType {
     pub name: &'static str,
     /// `"sales"` or `"purchase"`.
     pub cycle: &'static str,
+    /// Payment terms. Required on a sales order by every company verified
+    /// against: the server answers `Enter due date` when it is missing.
+    pub needs_due_date: bool,
 }
 
 pub const DOCUMENT_TYPES: &[DocumentType] = &[
     // Sales cycle
-    DocumentType { kind: "sales_quotation", set: "Quotations", name: "Sales quotation", cycle: "sales" },
-    DocumentType { kind: "sales_order", set: "Orders", name: "Sales order", cycle: "sales" },
-    DocumentType { kind: "delivery_note", set: "DeliveryNotes", name: "Delivery note", cycle: "sales" },
-    DocumentType { kind: "ar_invoice", set: "Invoices", name: "A/R invoice", cycle: "sales" },
-    DocumentType { kind: "ar_credit_memo", set: "CreditNotes", name: "A/R credit memo", cycle: "sales" },
-    DocumentType { kind: "sales_return", set: "Returns", name: "Sales return", cycle: "sales" },
+    DocumentType { kind: "sales_quotation", set: "Quotations", name: "Sales quotation", cycle: "sales", needs_due_date: true },
+    DocumentType { kind: "sales_order", set: "Orders", name: "Sales order", cycle: "sales", needs_due_date: true },
+    DocumentType { kind: "delivery_note", set: "DeliveryNotes", name: "Delivery note", cycle: "sales", needs_due_date: false },
+    DocumentType { kind: "ar_invoice", set: "Invoices", name: "A/R invoice", cycle: "sales", needs_due_date: false },
+    DocumentType { kind: "ar_credit_memo", set: "CreditNotes", name: "A/R credit memo", cycle: "sales", needs_due_date: false },
+    DocumentType { kind: "sales_return", set: "Returns", name: "Sales return", cycle: "sales", needs_due_date: false },
     // Purchase cycle
-    DocumentType { kind: "purchase_quotation", set: "PurchaseQuotations", name: "Purchase quotation", cycle: "purchase" },
-    DocumentType { kind: "purchase_order", set: "PurchaseOrders", name: "Purchase order", cycle: "purchase" },
-    DocumentType { kind: "goods_receipt", set: "PurchaseDeliveryNotes", name: "Goods receipt", cycle: "purchase" },
-    DocumentType { kind: "ap_invoice", set: "PurchaseInvoices", name: "A/P invoice", cycle: "purchase" },
-    DocumentType { kind: "ap_credit_memo", set: "PurchaseCreditNotes", name: "A/P credit memo", cycle: "purchase" },
-    DocumentType { kind: "purchase_return", set: "PurchaseReturns", name: "Purchase return", cycle: "purchase" },
+    DocumentType { kind: "purchase_quotation", set: "PurchaseQuotations", name: "Purchase quotation", cycle: "purchase", needs_due_date: true },
+    DocumentType { kind: "purchase_order", set: "PurchaseOrders", name: "Purchase order", cycle: "purchase", needs_due_date: true },
+    DocumentType { kind: "goods_receipt", set: "PurchaseDeliveryNotes", name: "Goods receipt", cycle: "purchase", needs_due_date: false },
+    DocumentType { kind: "ap_invoice", set: "PurchaseInvoices", name: "A/P invoice", cycle: "purchase", needs_due_date: true },
+    DocumentType { kind: "ap_credit_memo", set: "PurchaseCreditNotes", name: "A/P credit memo", cycle: "purchase", needs_due_date: false },
+    DocumentType { kind: "purchase_return", set: "PurchaseReturns", name: "Purchase return", cycle: "purchase", needs_due_date: false },
 ];
 
 pub fn find_by_kind(kind: &str) -> Option<&'static DocumentType> {
@@ -60,6 +63,8 @@ pub struct Line {
     pub item_code: String,
     pub quantity: f64,
     pub price: Option<f64>,
+    /// The line number this line copies from, set only on a copy.
+    pub base_line: Option<i64>,
 }
 
 /// A document the assistant wants to create, before it is posted.
@@ -68,7 +73,31 @@ pub struct Document {
     pub doc_type: &'static DocumentType,
     pub card_code: String,
     pub doc_date: Option<String>,
+    /// Payment due date. Required on a sales order by the companies verified
+    /// against; `None` leaves it to the server default.
+    pub due_date: Option<String>,
     pub lines: Vec<Line>,
+    /// Set when the document is copied from another one. Business One then
+    /// derives price, tax and currency from the base document instead of
+    /// trusting values rebuilt by hand, which is what makes a copy correct.
+    pub base: Option<BaseDocument>,
+}
+
+/// The document a copy is taken from.
+#[derive(Debug, Clone)]
+pub struct BaseDocument {
+    pub entry: i64,
+    /// `17` for a sales order, `540` for a purchase order.
+    pub base_type: i64,
+}
+
+/// The `BaseType` code Business One uses for each copyable source.
+pub fn base_type_for(source_set: &str) -> Option<i64> {
+    match source_set {
+        "Orders" => Some(17),
+        "PurchaseOrders" => Some(540),
+        _ => None,
+    }
 }
 
 /// Builds the Service Layer `POST` body for a document.
@@ -83,6 +112,13 @@ pub fn build_payload(doc: &Document) -> Value {
             if let Some(p) = l.price {
                 obj.insert("UnitPrice".into(), json!(p));
             }
+            if let Some(base) = &doc.base {
+                // `LineNum` is the base document's own line number, which is
+                // what links the copied line back to its source.
+                obj.insert("BaseEntry".into(), json!(base.entry));
+                obj.insert("BaseLine".into(), json!(l.base_line.unwrap_or(0)));
+                obj.insert("BaseType".into(), json!(base.base_type));
+            }
             Value::Object(obj)
         })
         .collect();
@@ -90,6 +126,9 @@ pub fn build_payload(doc: &Document) -> Value {
     body.insert("CardCode".into(), json!(doc.card_code));
     if let Some(d) = &doc.doc_date {
         body.insert("DocDate".into(), json!(d));
+    }
+    if let Some(d) = &doc.due_date {
+        body.insert("DocDueDate".into(), json!(d));
     }
     body.insert("DocumentLines".into(), json!(doc_lines));
     Value::Object(body)
@@ -139,7 +178,9 @@ mod tests {
             doc_type: find_by_kind("sales_order").unwrap(),
             card_code: "C0001".into(),
             doc_date: Some("2026-10-04".into()),
-            lines: vec![Line { item_code: "A00001".into(), quantity: 2.0, price: Some(100.0) }],
+            due_date: Some("2026-11-03".into()),
+            lines: vec![Line { item_code: "A00001".into(), quantity: 2.0, price: Some(100.0), base_line: None }],
+            base: None,
         }
     }
 
@@ -169,6 +210,47 @@ mod tests {
         assert_eq!(v["DocumentLines"][0]["ItemCode"], json!("A00001"));
         assert_eq!(v["DocumentLines"][0]["Quantity"], json!(2.0));
         assert_eq!(v["DocumentLines"][0]["UnitPrice"], json!(100.0));
+    }
+
+    #[test]
+    fn payload_never_carries_a_hand_written_tax_extension() {
+        // Business One derives tax from the partner; a hand-written extension is
+        // either rejected or, worse, silently wrong.
+        let v = build_payload(&doc());
+        assert!(v.get("TaxExtension").is_none(), "payload invented TaxExtension: {v}");
+        assert!(v.get("ShipToState").is_none(), "payload invented ShipToState: {v}");
+    }
+
+    #[test]
+    fn payload_carries_the_due_date_only_when_given() {
+        let v = build_payload(&doc());
+        assert_eq!(v["DocDueDate"], json!("2026-11-03"));
+        let mut d = doc();
+        d.due_date = None;
+        assert!(build_payload(&d).get("DocDueDate").is_none());
+    }
+
+    #[test]
+    fn copy_payload_links_every_line_to_its_base_line() {
+        let mut d = doc();
+        d.base = Some(BaseDocument { entry: 1260, base_type: 17 });
+        d.lines = vec![
+            Line { item_code: "A00001".into(), quantity: 2.0, price: None, base_line: Some(0) },
+            Line { item_code: "A00002".into(), quantity: 1.0, price: None, base_line: Some(1) },
+        ];
+        let v = build_payload(&d);
+        for (i, line) in v["DocumentLines"].as_array().unwrap().iter().enumerate() {
+            assert_eq!(line["BaseEntry"], json!(1260), "line {i} lost the base entry");
+            assert_eq!(line["BaseLine"], json!(i as i64), "line {i} has the wrong base line");
+            assert_eq!(line["BaseType"], json!(17), "line {i} has the wrong base type");
+        }
+    }
+
+    #[test]
+    fn only_orders_and_purchase_orders_name_a_base_type() {
+        assert_eq!(base_type_for("Orders"), Some(17));
+        assert_eq!(base_type_for("PurchaseOrders"), Some(540));
+        assert_eq!(base_type_for("Invoices"), None);
     }
 
     #[test]

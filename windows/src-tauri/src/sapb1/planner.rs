@@ -332,11 +332,18 @@ The JSON shape:\n\
   \"summary\": \"one line for the user, in plain language\"\n\
 }\n\n\
 Rules:\n\
+- Write every message as a helpful assistant: warm, brief, plain, and specific.\n\
+  Never expose a field name, a JSON key, or an internal step. A clarify question\n\
+  names the concrete options (\"this year, last year, or all time?\"), not \"which period?\".\n\
 - \"answer\" = no query. Put your conversational reply in summary. Use it for greetings,\n\
   thanks, general questions, or questions that are not about the user's ERP data.\n\
 - \"detail\" = list entities from any SAP entity set, meaningful fields only. Use for\n\
   \"show me employees\", \"list items\", \"customer details\". entitySet names a set;\n\
   the executor picks which fields to show. filter narrows it.\n\
+- When the user wants to choose items or customers (\"show me a list to pick from\",\n\
+  \"list the items\", \"list the customers\"), use kind \"detail\" with entitySet Items or\n\
+  BusinessPartners. The app renders each row as a clickable choice — never ask the\n\
+  user to type a code when a list will do.\n\
 - \"create\" = build a sales or purchase document, never post it. entitySet names a\n\
   document set (Orders, Invoices, PurchaseOrders, …); cardCode the customer or\n\
   supplier; lines the items with quantity and optional price. The app shows a\n\
@@ -434,20 +441,38 @@ pub async fn plan(
     }
 
     let system = prompt();
-    let raw = match backend.style {
-        ApiStyle::Anthropic => {
-            let messages = anthropic_messages(history, question);
-            crate::claude::chat_plain(backend.base(), &model, &backend.key, &system, &messages).await?
-        }
-        ApiStyle::OpenAICompatible => {
-            let messages = openai_messages(&system, history, question);
-            crate::openai::chat(backend.base(), Some(backend.key.as_str()), &model, &messages).await?
+    let first = call_model(&backend, &model, &system, history, question).await?;
+    // Models occasionally return prose or truncated JSON despite the instruction.
+    // One retry recovers most of those before the user ever sees a failure.
+    let plan = match parse_plan_json(&first) {
+        Ok(p) => p,
+        Err(_) => {
+            let retry = call_model(&backend, &model, &system, history, question).await?;
+            parse_plan_json(&retry)?
         }
     };
-
-    let plan: Plan = parse_plan_json(&raw)?;
     plan.validated()?;
     Ok(plan)
+}
+
+/// One model call, returning the raw text (JSON expected).
+async fn call_model(
+    backend: &providers::Resolved,
+    model: &str,
+    system: &str,
+    history: &[ChatTurn],
+    question: &str,
+) -> Result<String, String> {
+    match backend.style {
+        ApiStyle::Anthropic => {
+            let messages = anthropic_messages(history, question);
+            crate::claude::chat_plain(backend.base(), model, &backend.key, system, &messages).await
+        }
+        ApiStyle::OpenAICompatible => {
+            let messages = openai_messages(system, history, question);
+            crate::openai::chat(backend.base(), Some(backend.key.as_str()), model, &messages).await
+        }
+    }
 }
 
 /// Extracts the first JSON object from the model's answer. Models sometimes wrap

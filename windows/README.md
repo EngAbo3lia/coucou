@@ -136,6 +136,112 @@ windows/
 `%LOCALAPPDATA%\Coucou\coucou.log` — hook events, permission decisions, poller
 problems. It stays on your machine.
 
+## Testing
+
+Two suites. The offline one always runs; the live one needs a server and writes
+real documents, so it is `#[ignore]`d and you opt in.
+
+```powershell
+cd windows
+$env:CARGO_TARGET_DIR = "$env:TEMP\opencode\coucou-target"   # keeps D: free
+
+cargo test --manifest-path src-tauri/Cargo.toml --lib          # offline suite
+npx tsc --noEmit -p tsconfig.json                             # front end
+```
+
+### Offline suite
+
+140 tests, no network. `sapb1::coverage` is the wide one: it crosses every
+endpoint in the generated catalogue with every query shape, filter literal,
+field request and document payload, and prints its own case count.
+
+```
+offline cases: 11040 read URLs, 2300 count URLs, 9660 filter literals,
+3680 field checks, 2300 identifier checks, 1380 module checks, 252 document payloads
+TOTAL 30612 cases over 460 endpoints
+```
+
+That number is generated, not claimed: each case calls the same `query::*` and
+`documents::build_payload` the app uses at runtime. The test asserts the total
+stays at or above 20,000, so a regression that quietly drops endpoints fails.
+
+The catalogue itself is regenerated from your own server, never hand-edited:
+
+```powershell
+$env:SAP_METADATA_OUT = "$env:TEMP\sap-metadata.xml"
+cargo test --manifest-path src-tauri/Cargo.toml --lib live_dump_metadata_for_catalogue -- --ignored --nocapture
+node scripts/gen-sap-catalogue.mjs --in $env:SAP_METADATA_OUT --out src-tauri/src/sapb1/catalogue.rs
+```
+
+### Live suite
+
+Every live test is `#[ignore]`, reads credentials from the Credential Manager,
+and talks to the company you configured. **They create real documents.** Run one
+at a time, on a test company, and check what it posted:
+
+```powershell
+cargo test --manifest-path src-tauri/Cargo.toml --lib sapb1::ask::tests::live_sales_cycle -- --ignored --nocapture
+# order OK DocEntry=1261 DocNum=1261 DocDueDate="2015-02-21T00:00:00Z"
+# invoice OK DocEntry=1409 DocNum=1408
+
+cargo test --manifest-path src-tauri/Cargo.toml --lib sapb1::ask::tests::live_partner -- --ignored --nocapture
+# refused as expected: Maxi-Teq (C20000) has no billing state, so Business One
+# will reject this Sales order. Set a bill-to state on the customer first.
+```
+
+The sales-cycle test goes through `create_document`, the same function the chat
+confirmation calls, so the due date, the partner check and the payload builder
+are all exercised rather than a hand-written body.
+
+Two facts about this company came out of live testing and shape the code:
+
+- **Never hand-write `TaxExtension`.** Business One derives tax from the partner,
+  and a hand-written extension is rejected or silently wrong. Instead
+  `create_document` reads `BillToState` first and refuses by customer name
+  (`Maxi-Teq (C20000) has no billing state…`) rather than letting the server
+  answer `TaxExtension.BillToState`.
+- **A copy is a base-document reference, not rebuilt lines.** Posting
+  `BaseEntry` / `BaseLine` / `BaseType` (`17` sales order, `540` purchase order)
+  lets the server read price, tax and currency from the source. Rebuilding lines
+  by hand loses all three. `ask::copy_plan` refuses a closed source up front,
+  because the server's answer there is opaque.
+
+Dates: `A00001` is priced in USD and this company has no exchange rate for the
+current date, so the live tests use `2015-01-22` — where the rate exists. That is
+a fixture, not a default the app applies.
+
+### Before shipping a change
+
+Full check, then build and install:
+
+```powershell
+cargo test --manifest-path src-tauri/Cargo.toml --lib   # expect 140 passed, 7 ignored
+npx tsc --noEmit -p tsconfig.json                      # expect no output
+npm run tauri build -- --no-bundle                     # builds coucou.exe only
+```
+
+Then install it. Quit Coucou first — the tray menu, or
+`Get-Process coucou | Stop-Process` — because a running process keeps the old
+image, and then:
+
+```powershell
+Get-Process coucou -ErrorAction SilentlyContinue | Stop-Process
+Copy-Item "$env:TEMP\opencode\coucou-target\release\coucou.exe" "$env:LOCALAPPDATA\Coucou\coucou.exe" -Force
+Start-Process "$env:LOCALAPPDATA\Coucou\coucou.exe"
+```
+
+`coucou-hook.exe` is unchanged unless you touched `hook/`, so it keeps its own
+copy. Confirm the launch by the log line, not by the absence of an error:
+
+```
+%LOCALAPPDATA%\Coucou\coucou.log   →   --- Coucou 0.1.1 started ---
+```
+
+The LLM-driven chat path can't be tested without an API key: this account's
+OpenRouter quota is exhausted (`403 Forbidden: Key limit exceeded (total
+limit).`). The direct Service Layer tests above bypass the model, so they still
+prove the ERP side.
+
 ## What's different from the Mac version
 
 - No notch, so the island lives at the top centre of the screen and retracts into

@@ -1,15 +1,15 @@
-//! Answers questions about the ERP from the island chat.
+﻿//! Answers questions about the ERP from the island chat.
 //!
 //! The model is the brain. A question plus the conversation so far goes to the
 //! configured chat backend, which returns a structured `Plan`. The plan is
 //! validated against the report allowlists and executed. Nothing here does
 //! keyword routing: the model decides what to ask, what to run, and how to
-//! answer. The only hard guard is the validator — a plan can never read a field
+//! answer. The only hard guard is the validator â€” a plan can never read a field
 //! outside the allowlist, and filter values are sanitised before they reach the
 //! query string.
 //!
-//! The queries respect the rules in `query` — no `$filter` with `$apply`, no date
-//! functions in `groupby` — so the executor fetches raw rows and slices, buckets
+//! The queries respect the rules in `query` â€” no `$filter` with `$apply`, no date
+//! functions in `groupby` â€” so the executor fetches raw rows and slices, buckets
 //! and sums in Rust rather than asking the server to do something it rejects.
 
 use std::collections::HashMap;
@@ -99,9 +99,9 @@ pub async fn ask(
     let plan = planner::plan(settings, question, history).await.map_err(|e| {
         // Never surface a raw serde/internal string to the user.
         if e.contains("No chat backend") {
-            "No AI backend is set up for the SAP Harness. Configure one in Settings → Agents, then ask again.".to_string()
+            "No AI backend is set up for the SAP Harness. Configure one in Settings â†’ Agents, then ask again.".to_string()
         } else if e.contains("Bad plan") || e.contains("no JSON") {
-            "I couldn't work out how to answer that one. Try asking it a different way.".to_string()
+            "Sorry, I didn't quite catch that. Could you say it another way â€” for example, \"show me sales this year\" or \"list the items\"?".to_string()
         } else {
             e
         }
@@ -146,7 +146,7 @@ fn answer_reply(plan: &Plan) -> Answer {
     }
 }
 
-// ── executor ──────────────────────────────────────────────────────────────────
+// â”€â”€ executor â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /// Runs a validated plan against the ERP.
 async fn execute(c: &Credentials, plan: &Plan) -> Result<Answer, String> {
@@ -168,46 +168,6 @@ async fn execute(c: &Credentials, plan: &Plan) -> Result<Answer, String> {
         PlanKind::Answer => Ok(answer_reply(plan)),
         PlanKind::Clarify => Err("The plan still needs a clarifying answer.".into()),
     }
-}
-
-/// A filter value as a safe OData literal. The field and the operator are
-/// validated by `Plan::validated()`; the value is checked here so a value can
-/// never break out of the literal or append a clause.
-fn filter_literal(value: &str) -> Result<String, String> {
-    let v = value.trim();
-    if v.is_empty() {
-        return Err("Empty filter value.".into());
-    }
-    // Anything that could close the literal or start a new clause is refused.
-    if v.chars()
-        .any(|c| matches!(c, '\'' | '"' | ';' | '&' | '%' | '$' | '(' | ')' | '\\' | '|'))
-    {
-        return Err(format!("Unsafe filter value {v:?}."));
-    }
-    if is_iso_date(v) {
-        // `datetime'...'`, the form verified against the live server.
-        return Ok(format!("datetime'{v}'"));
-    }
-    if v.parse::<f64>().is_ok() {
-        return Ok(v.to_string());
-    }
-    // A plain string literal (an enum like bost_Open, a status word, a code).
-    if v.chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ' ' | '/' | ':' | '@'))
-    {
-        Ok(format!("'{v}'"))
-    } else {
-        Err(format!("Unsafe filter value {v:?}."))
-    }
-}
-
-fn is_iso_date(v: &str) -> bool {
-    v.len() == 10
-        && v.as_bytes()[4] == b'-'
-        && v.as_bytes()[7] == b'-'
-        && v[..4].bytes().all(|b| b.is_ascii_digit())
-        && v[5..7].bytes().all(|b| b.is_ascii_digit())
-        && v[8..].bytes().all(|b| b.is_ascii_digit())
 }
 
 /// Whether the set carries a `DocDate` field, in the report allowlist or the
@@ -235,13 +195,8 @@ async fn fetch_rows(
             fields.push(f.field.clone());
         }
     }
-    let select = fields.join(",");
-    let query = if select.is_empty() {
-        format!("{set}?$top={ROW_CAP}")
-    } else {
-        format!("{set}?$select={select}&$top={ROW_CAP}")
-    };
-    let rows = transport::get(c, &query).await?;
+    let url = query::build_list_url(set, &fields, query::ROW_CAP);
+    let rows = transport::get(c, &url).await?;
     let list = rows.get("value").and_then(Value::as_array).cloned().unwrap_or_default();
     let filtered: Vec<Value> = list
         .into_iter()
@@ -372,7 +327,7 @@ async fn grouped(
             .iter()
             .map(|d| r.get(d).and_then(Value::as_str).unwrap_or("?").to_string())
             .collect::<Vec<_>>()
-            .join(" · ");
+            .join(" Â· ");
         let v = r.get(&metric.field).and_then(Value::as_f64).unwrap_or(0.0);
         *groups.entry(key).or_default() += v;
     }
@@ -433,14 +388,10 @@ async fn count_with_filter(
     }
     for f in &plan.filter {
         // The field and op were validated; the value is sanitised here.
-        filter.push(format!("{} {} {}", f.field, f.op, filter_literal(&f.value)?));
+        filter.push(format!("{} {} {}", f.field, f.op, query::filter_literal(&f.value)?));
     }
-    let query = if filter.is_empty() {
-        format!("{set}/$count")
-    } else {
-        format!("{set}/$count?$filter={}", filter.join(" and "))
-    };
-    let raw = transport::get_text(c, &query).await?;
+    let url = query::build_count_url(set, &filter.join(" and "));
+    let raw = transport::get_text(c, &url).await?;
     raw.trim().trim_matches('"').parse().map_err(|_| format!("$count returned {raw:?}"))
 }
 
@@ -530,12 +481,12 @@ async fn detail_plan(
             if parts.is_empty() {
                 None
             } else {
-                Some(parts.join(" · "))
+                Some(parts.join(" Â· "))
             }
         })
         .collect();
 
-    let title = format!("{} — detail", friendly_set(set));
+    let title = format!("{} â€” detail", friendly_set(set));
     let text = if lines.is_empty() {
         "No matching records.".to_string()
     } else {
@@ -679,13 +630,16 @@ async fn create_plan(_c: &Credentials, plan: &Plan) -> Result<Answer, String> {
             item_code: l.item_code.clone(),
             quantity: l.quantity,
             price: l.price,
+            base_line: None,
         })
         .collect();
     let doc = documents::Document {
         doc_type,
         card_code: plan.card_code.clone().unwrap_or_default(),
         doc_date: plan.doc_date.clone(),
+        due_date: None,
         lines,
+        base: None,
     };
     documents::validate(&doc)?;
 
@@ -709,7 +663,7 @@ async fn create_plan(_c: &Credentials, plan: &Plan) -> Result<Answer, String> {
         text,
         kind: "confirm".into(),
         plan: Some(title),
-        source: "preview — not posted".into(),
+        source: "preview â€” not posted".into(),
         payload: Some(spec),
         ..Answer::default()
     })
@@ -728,15 +682,24 @@ async fn copy_plan(c: &Credentials, plan: &Plan) -> Result<Answer, String> {
         .map(|f| f.value.trim_matches('"').to_string())
         .ok_or("No source document number.")?;
 
-    let query = format!("{source}?$filter=DocNum eq {num}&$select=DocEntry&$top=1");
+    let base_type = documents::base_type_for(source)
+        .ok_or_else(|| format!("{source} cannot be copied to a document."))?;
+    let query = format!("{source}?$filter=DocNum eq {num}&$select=DocEntry,Status&$top=1");
     let found = transport::get(c, &query).await?;
-    let entry = found
+    let row = found
         .get("value")
         .and_then(Value::as_array)
         .and_then(|a| a.first())
-        .and_then(|d| d.get("DocEntry"))
-        .and_then(Value::as_i64)
         .ok_or_else(|| format!("No {source} with number {num}."))?;
+    let entry = row.get("DocEntry").and_then(Value::as_i64).unwrap_or_default();
+    if entry == 0 {
+        return Err(format!("No {source} with number {num}."));
+    }
+    // A closed source cannot be copied: the server answers `One of the base
+    // documents has already been closed`, which is opaque in a chat bubble.
+    if row.get("Status").and_then(Value::as_str) == Some("Close") {
+        return Err(format!("{source} {num} is closed, so it cannot be copied."));
+    }
 
     // Lines come only on the single-entity GET, not on a list query, and
     // `$expand=DocumentLines` is rejected by this server.
@@ -756,23 +719,30 @@ async fn copy_plan(c: &Credentials, plan: &Plan) -> Result<Answer, String> {
                     }
                     let quantity = l.get("Quantity").and_then(Value::as_f64).unwrap_or(0.0);
                     let price = l.get("UnitPrice").and_then(Value::as_f64);
-                    Some(documents::Line { item_code, quantity, price })
+                    // The base line number is what links a copied line back to
+                    // its source, and is not the same as the position here.
+                    let base_line = l.get("LineNum").and_then(Value::as_i64);
+                    Some(documents::Line { item_code, quantity, price, base_line })
                 })
                 .collect()
         })
         .unwrap_or_default();
 
-    let doc = documents::Document { doc_type: target, card_code, doc_date, lines };
+    let base = documents::BaseDocument { entry, base_type };
+    let doc = documents::Document { doc_type: target, card_code, doc_date, due_date: None, lines, base: Some(base) };
     documents::validate(&doc)?;
 
     let spec = serde_json::json!({
         "set": target.set,
         "cardCode": doc.card_code,
         "docDate": doc.doc_date,
+        "baseEntry": entry,
+        "baseType": base_type,
         "lines": doc.lines.iter().map(|l| serde_json::json!({
             "itemCode": l.item_code,
             "quantity": l.quantity,
             "price": l.price,
+            "baseLine": l.base_line,
         })).collect::<Vec<_>>(),
     });
 
@@ -783,7 +753,7 @@ async fn copy_plan(c: &Credentials, plan: &Plan) -> Result<Answer, String> {
         text,
         kind: "confirm".into(),
         plan: Some(title),
-        source: "preview — not posted".into(),
+        source: "preview â€” not posted".into(),
         payload: Some(spec),
         ..Answer::default()
     })
@@ -803,7 +773,7 @@ fn aggregate_rows(rows: &[Value], field: &str, op: &str, dims: Option<&[String]>
                 .iter()
                 .map(|d| r.get(d).and_then(Value::as_str).unwrap_or("?"))
                 .collect::<Vec<_>>()
-                .join("·");
+                .join("Â·");
             *map.entry(key).or_default() += v;
         }
     }
@@ -819,7 +789,7 @@ fn aggregate_rows(rows: &[Value], field: &str, op: &str, dims: Option<&[String]>
     }
 }
 
-// ── titles ────────────────────────────────────────────────────────────────────
+// â”€â”€ titles â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 fn build_source(plan: &Plan, range: &Option<(String, String)>) -> String {
     let set = plan.entity_set.as_deref().unwrap_or("");
@@ -833,7 +803,7 @@ fn build_source(plan: &Plan, range: &Option<(String, String)>) -> String {
     parts.join(", ")
 }
 
-/// A friendly name for an entity set, for a human title — never a raw set name
+/// A friendly name for an entity set, for a human title â€” never a raw set name
 /// like "Invoices" when "sales" reads better, and never a field name.
 fn friendly_set(set: &str) -> &str {
     match set {
@@ -852,7 +822,7 @@ fn friendly_set(set: &str) -> &str {
     }
 }
 
-/// " last month", " last quarter" — appended to a title.
+/// " last month", " last quarter" â€” appended to a title.
 fn time_label(w: Option<planner::TimeWindow>) -> &'static str {
     use planner::TimeWindow::*;
     match w {
@@ -958,18 +928,18 @@ mod tests {
 
     #[test]
     fn filter_values_are_literalised_safely() {
-        assert_eq!(filter_literal("bost_Open").unwrap(), "'bost_Open'");
-        assert_eq!(filter_literal("42").unwrap(), "42");
-        assert_eq!(filter_literal("2025-01-01").unwrap(), "datetime'2025-01-01'");
-        assert_eq!(filter_literal("C0001").unwrap(), "'C0001'");
+        assert_eq!(query::filter_literal("bost_Open").unwrap(), "'bost_Open'");
+        assert_eq!(query::filter_literal("42").unwrap(), "42");
+        assert_eq!(query::filter_literal("2025-01-01").unwrap(), "datetime'2025-01-01'");
+        assert_eq!(query::filter_literal("C0001").unwrap(), "'C0001'");
     }
 
     #[test]
     fn a_filter_value_cannot_break_out_of_the_literal() {
         for bad in ["x' or '1' eq '1", "a; DROP", "a&b", "$top", "a'b", "a(b)", "a\\b", "a|b"] {
-            assert!(filter_literal(bad).is_err(), "{bad:?} should be refused");
+            assert!(query::filter_literal(bad).is_err(), "{bad:?} should be refused");
         }
-        assert!(filter_literal("").is_err());
+        assert!(query::filter_literal("").is_err());
     }
 
     #[test]
@@ -1049,4 +1019,95 @@ mod tests {
         assert_eq!(a.clarifying_question.as_deref(), Some("Which period?"));
         assert_eq!(a.source, "no query run");
     }
+
+    /// Runs the real write path end to end: a sales order, then an invoice
+    /// copied from it through `BaseEntry`/`BaseLine`/`BaseType`. It goes through
+    /// `create_document`, so the due date, the partner check and the payload
+    /// builder are all exercised, not a hand-written body.
+    /// Creates documents in the test company.
+    #[test]
+    #[ignore = "creates documents on the configured test company"]
+    fn live_sales_cycle_create_order_then_invoice() {
+        let c = super::super::credentials_from_secrets().expect("SAP credentials");
+        let item = "A00001";
+        // C70000 carries valid CA/CA states, unlike C20000 whose state is null.
+        let card = "C70000";
+        // Existing documents are from 2015, where the USD exchange rate exists.
+        let doc_date = "2015-01-22".to_string();
+
+        let order_spec = serde_json::json!({
+            "set": "Orders",
+            "cardCode": card,
+            "docDate": doc_date,
+            "lines": [{ "itemCode": item, "quantity": 2.0, "price": 300.0 }],
+        });
+        let order = tauri::async_runtime::block_on(super::super::create_document(&c, &order_spec))
+            .unwrap_or_else(|e| panic!("order POST failed: {e}"));
+        let order_entry = order["DocEntry"].as_i64().expect("order DocEntry");
+        println!(
+            "order OK DocEntry={order_entry} DocNum={} DocDueDate={}",
+            order["DocNum"], order["DocDueDate"]
+        );
+
+        let src = tauri::async_runtime::block_on(transport::get(&c, &format!("Orders({order_entry})")))
+            .expect("read back order");
+        let base_line = src["DocumentLines"]
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|l| l["LineNum"].as_i64())
+            .expect("order line number");
+
+        let invoice_spec = serde_json::json!({
+            "set": "Invoices",
+            "cardCode": card,
+            "docDate": doc_date,
+            "baseEntry": order_entry,
+            "baseType": 17,
+            "lines": [{ "itemCode": item, "quantity": 2.0, "baseLine": base_line }],
+        });
+        let invoice = tauri::async_runtime::block_on(super::super::create_document(&c, &invoice_spec))
+            .unwrap_or_else(|e| panic!("invoice POST failed: {e}"));
+        println!("invoice OK DocEntry={} DocNum={}", invoice["DocEntry"], invoice["DocNum"]);
+    }
+
+    /// A partner with no billing state must be refused with a readable reason
+    /// before the document is built, not after the server rejects it.
+    #[test]
+    #[ignore = "reads live Business Partner data"]
+    fn live_partner_without_billing_state_is_refused_by_name() {
+        let c = super::super::credentials_from_secrets().expect("SAP credentials");
+        let spec = serde_json::json!({
+            "set": "Orders",
+            "cardCode": "C20000",
+            "docDate": "2015-01-22",
+            "lines": [{ "itemCode": "A00001", "quantity": 2.0 }],
+        });
+        match tauri::async_runtime::block_on(super::super::create_document(&c, &spec)) {
+            Err(e) => {
+                println!("refused as expected: {e}");
+                assert!(e.contains("billing state"), "unreadable reason: {e}");
+            }
+            // A server that accepted it means the partner was fixed; nothing to
+            // assert beyond the absence of a panic.
+            Ok(v) => println!("C20000 is now usable, DocEntry={}", v["DocEntry"]),
+        }
+    }
+
+    /// Dumps the company's `$metadata` to a file so the catalogue generator can
+    /// enumerate every endpoint, including the ones no feature uses yet.
+    #[test]
+    #[ignore = "reads live Service Layer metadata and writes a temp file"]
+    fn live_dump_metadata_for_catalogue() {
+        let c = super::super::credentials_from_secrets().expect("SAP credentials");
+        let xml = tauri::async_runtime::block_on(transport::get_text(&c, "$metadata")).expect("metadata");
+        let path = std::path::PathBuf::from(
+            std::env::var("SAP_METADATA_OUT")
+                .unwrap_or_else(|_| std::env::temp_dir().join("sap-metadata.xml").display().to_string()),
+        );
+        std::fs::write(&path, &xml).expect("write metadata");
+        let sets = xml.matches("<EntitySet ").count();
+        let types = xml.matches("<EntityType ").count();
+        println!("wrote {} bytes: {sets} entity sets, {types} entity types -> {}", xml.len(), path.display());
+    }
 }
+

@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 /// Re-login a minute before the server's 30-minute idle timeout.
 const SESSION_TTL: Duration = Duration::from_secs(29 * 60);
 
@@ -107,6 +107,34 @@ async fn session(c: &Credentials) -> Result<String, String> {
 pub async fn get(c: &Credentials, tail: &str) -> Result<Value, String> {
     let body = get_raw(c, tail).await?;
     serde_json::from_str(&body).map_err(|e| format!("Bad JSON: {e}"))
+}
+
+/// `POST` a JSON body to a Service Layer path, e.g. create a document. Re-logs
+/// in once if the cached session expired. Returns the parsed response.
+pub async fn post(c: &Credentials, tail: &str, body: &Value) -> Result<Value, String> {
+    let mut id = session(c).await?;
+    for attempt in 0..2 {
+        let res = client()
+            .post(c.url(tail))
+            .header("Cookie", format!("B1SESSION={id}"))
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| format!("No connection: {e}"))?;
+        let status = res.status();
+        if status.as_u16() == 401 && attempt == 0 {
+            forget();
+            id = login(c).await?;
+            store(&c.key(), &id);
+            continue;
+        }
+        let text = res.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(error_message(status.as_u16(), &serde_json::from_str(&text).unwrap_or(Value::Null)));
+        }
+        return serde_json::from_str(&text).map_err(|e| format!("Bad JSON: {e}"));
+    }
+    Err("Session kept expiring".into())
 }
 
 /// `GET` a path that answers XML rather than JSON, such as `$metadata`.

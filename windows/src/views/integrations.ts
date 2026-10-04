@@ -562,6 +562,42 @@ function setSapState(id: string, patch: Partial<IntegrationInfo>) {
   State.notify();
 }
 
+/** Status shown on the SAP card: a short title and a one-line detail, plus a
+ *  colour that carries the state (green ready, amber needs a test, red broken). */
+function sapStatus(
+  info: IntegrationInfo | undefined,
+  probe: SapB1Probe | null,
+  ctx: { sapProbing: boolean; complete: boolean; missing: typeof SAP_FIELDS; sapKeys: Record<string, boolean> | null },
+): { title: string; detail: string; color: string } {
+  if (info?.error) return { title: "Connection failed", detail: info.error, color: "#F4505E" };
+  if (probe) {
+    if (probe.ready) {
+      const bad = probe.sets.filter((s) => !s.present || s.missingFields.length > 0);
+      if (bad.length === 0) {
+        return {
+          title: "Connected",
+          detail: `${probe.entitySetCount} entity sets · ${probe.typeCount} types · all report fields present`,
+          color: "#22C55E",
+        };
+      }
+      return {
+        title: "Connected — incomplete",
+        detail: `missing fields in ${bad.map((s) => s.entitySet).join(", ")}`,
+        color: "#f5a524",
+      };
+    }
+    return {
+      title: "Connected — incomplete",
+      detail: `missing: ${probe.sets.filter((s) => !s.present).map((s) => s.entitySet).join(", ")}`,
+      color: "#f5a524",
+    };
+  }
+  if (ctx.sapProbing) return { title: "Connecting…", detail: "reaching the Service Layer", color: "#f5a524" };
+  if (ctx.complete) return { title: "Credentials stored", detail: "not tested yet — press Test connection", color: "#f5a524" };
+  if (ctx.sapKeys) return { title: "Needs credentials", detail: `add ${ctx.missing.map((f) => f.label).join(", ")}`, color: "#F4505E" };
+  return { title: "Checking…", detail: "reading the Credential Manager", color: "#6b7079" };
+}
+
 export function sapB1Card(task: AgentTask, hooks: IntegrationCardHooks): HTMLElement {
   const info = State.integrations[task.id];
   const probe = (info?.data as { probe?: SapB1Probe } | undefined)?.probe ?? null;
@@ -571,22 +607,7 @@ export function sapB1Card(task: AgentTask, hooks: IntegrationCardHooks): HTMLEle
   const missing = sapKeys ? SAP_FIELDS.filter((f) => !stored(f.key)) : [];
   const complete = sapKeys !== null && missing.length === 0;
 
-  const label = info?.error
-    ?? (probe
-      ? probe.ready
-        ? `Connected · ${probe.entitySetCount} entity sets · all report fields present`
-        : `Connected · missing ${probe.sets.filter((s) => !s.present || s.missingFields.length > 0).map((s) => s.entitySet).join(", ")}`
-      : sapProbing
-        ? "Connecting…"
-        : complete
-          ? "Credentials stored · not tested yet"
-          : sapKeys
-            ? `Missing: ${missing.map((f) => f.label).join(", ")}`
-            : "Checking credentials…");
-  const statusColor = info?.error ? "#F4505E"
-    : probe?.ready ? "#22C55E"
-    : complete ? "#f5a524"
-    : "#F4505E";
+  const status = sapStatus(info, probe, { sapProbing, complete, missing, sapKeys });
 
   const actions = h("div", { class: "int-actions" });
   const test = h("button", { class: "link-btn", style: `color:${task.color}d9`, text: "Test connection" });
@@ -653,7 +674,13 @@ export function sapB1Card(task: AgentTask, hooks: IntegrationCardHooks): HTMLEle
     "div",
     { class: "int-card" },
     header(task.color, task.name, "ERP"),
-    h("div", { class: "int-status" }, dot(statusColor, 5), h("span", { text: label })),
+    h("div", { class: "sap-status", style: `--sap-c:${status.color}` },
+      h("span", { class: "sap-status-dot" }),
+      h("div", { class: "sap-status-text" },
+        h("b", { text: status.title }),
+        h("span", { text: status.detail }),
+      ),
+    ),
     actions,
   );
 }

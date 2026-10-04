@@ -14,6 +14,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::catalogue;
+use super::documents;
 use super::query;
 use crate::providers::{self, ApiStyle};
 use crate::settings::Settings;
@@ -36,6 +38,15 @@ pub struct FilterSpec {
     /// "ge" | "le" | "gt" | "lt" | "eq".
     pub op: String,
     pub value: String,
+}
+
+/// One line of a document the assistant wants to create.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct LineSpec {
+    pub item_code: String,
+    pub quantity: f64,
+    pub price: Option<f64>,
 }
 
 /// A symbolic time window, resolved to real dates by the executor. The model is
@@ -83,6 +94,12 @@ pub enum PlanKind {
     Aggregate,
     List,
     Count,
+    /// A list of entities from any SAP entity set, fields auto-selected.
+    Detail,
+    /// Create a sales or purchase document (never posted without confirmation).
+    Create,
+    /// Copy a source document into its target (order -> invoice).
+    Copy,
     /// Just reply with `summary` — a welcome, a general answer, a non-data reply.
     Answer,
     /// Ambiguous: needs the user to answer `clarifying_question`.
@@ -100,8 +117,16 @@ pub struct Plan {
     pub subtract_entity_set: Option<String>,
     pub group_by: Vec<String>,
     pub metrics: Vec<MetricSpec>,
-    pub filter: Option<FilterSpec>,
+    /// Zero or more ANDed conditions. A range is two conditions on the same
+    /// field (DocDate ge … and le …), so an arbitrary year or month is expressible.
+    pub filter: Vec<FilterSpec>,
     pub time_window: Option<TimeWindow>,
+    /// For kind "create": the customer or supplier code.
+    pub card_code: Option<String>,
+    /// For kind "create": an ISO document date (optional, server defaults to today).
+    pub doc_date: Option<String>,
+    /// For kind "create": the lines to post.
+    pub lines: Vec<LineSpec>,
     /// Present when kind is "clarify".
     pub clarifying_question: Option<String>,
     /// A one-line human description, shown as the "what I'll do" bubble. For
@@ -115,6 +140,9 @@ impl Plan {
             "aggregate" => PlanKind::Aggregate,
             "list" => PlanKind::List,
             "count" => PlanKind::Count,
+            "detail" => PlanKind::Detail,
+            "create" => PlanKind::Create,
+            "copy" => PlanKind::Copy,
             "answer" => PlanKind::Answer,
             _ => PlanKind::Clarify,
         }
@@ -133,6 +161,63 @@ impl Plan {
     /// and the executor know. This is the hard guard, not the prompt.
     pub fn validated(&self) -> Result<(), String> {
         if self.is_clarify() || self.is_answer() {
+            return Ok(());
+        }
+        // A detail list reads any SAP entity set; the executor picks the fields.
+        // Only the set name and any filter need checking here.
+        if self.parsed_kind() == PlanKind::Detail {
+            let set = self
+                .entity_set
+                .as_deref()
+                .ok_or("No entity set in the plan.")?;
+            if catalogue::entity_set(set).is_none() {
+                return Err(format!("{set} is not a SAP entity set."));
+            }
+            for f in &self.filter {
+                if !is_filter_op(&f.op) {
+                    return Err(format!("Unknown filter op {:?}.", f.op));
+                }
+                // When the set's type is in the catalogue we know its fields and
+                // can reject a bad one. When it is not (e.g. EmployeesInfo), the
+                // value is still sanitised; a wrong field just errors on the server.
+                if catalogue::type_for_set(set).is_some() && !catalogue::has_field(set, &f.field) {
+                    return Err(format!("{}.{} is not a field of that entity.", set, f.field));
+                }
+            }
+            return Ok(());
+        }
+        // A create document: the type, customer and lines must be present. Item
+        // codes and the customer are checked against the server in the executor.
+        if self.parsed_kind() == PlanKind::Create {
+            let set = self.entity_set.as_deref().ok_or("No document type.")?;
+            if documents::find_by_set(set).is_none() {
+                return Err(format!("{set} is not a document type I can create."));
+            }
+            if self.card_code.as_deref().map(str::trim).unwrap_or("").is_empty() {
+                return Err("No customer or supplier for the document.".into());
+            }
+            if self.lines.is_empty() {
+                return Err("No lines for the document.".into());
+            }
+            for l in &self.lines {
+                if l.item_code.trim().is_empty() {
+                    return Err("A line has no item code.".into());
+                }
+                if !(l.quantity > 0.0) {
+                    return Err("Quantity must be positive.".into());
+                }
+            }
+            return Ok(());
+        }
+        // A copy needs a source document and a filter naming its number.
+        if self.parsed_kind() == PlanKind::Copy {
+            let source = self.entity_set.as_deref().ok_or("No source document.")?;
+            if documents::copy_target(source).is_none() {
+                return Err(format!("{source} cannot be copied to a document."));
+            }
+            if !self.filter.iter().any(|f| f.field == "DocNum" && f.op == "eq") {
+                return Err("Copy needs the source document number (filter DocNum eq …).".into());
+            }
             return Ok(());
         }
         let set = self
@@ -165,7 +250,7 @@ impl Plan {
                 return Err(format!("{}.{} is not a group-by field.", set, d));
             }
         }
-        if let Some(f) = &self.filter {
+        for f in &self.filter {
             if !is_filter_op(&f.op) {
                 return Err(format!("Unknown filter op {:?}.", f.op));
             }
@@ -209,6 +294,10 @@ fn catalogue_context() -> String {
          - Time windows are named symbols only: today, yesterday, this_week, last_week,\n\
            this_month, last_month, this_quarter, last_quarter, this_year, last_year,\n\
            last_30_days, all.\n\
+         - For an arbitrary date range the user names, use a DocDate filter (ge and/or le)\n\
+           instead of a time window.\n\
+         - For a \"detail\" list you may name any SAP entity set (EmployeesInfo, Items,\n\
+           BusinessPartners, Activities, …); the executor picks the meaningful fields.\n\
          - Net sales = Invoices minus CreditNotes (subtractEntitySet \"CreditNotes\").\n\
            Net purchases = PurchaseInvoices minus PurchaseCreditNotes.\n",
     );
@@ -229,22 +318,38 @@ You may query the ERP. When you do, return a single JSON object and nothing else
 \n\n\
 The JSON shape:\n\
 {\n\
-  \"kind\": \"aggregate\" | \"list\" | \"count\" | \"answer\" | \"clarify\",\n\
+  \"kind\": \"aggregate\" | \"list\" | \"count\" | \"detail\" | \"create\" | \"copy\" | \"answer\" | \"clarify\",\n\
   \"entitySet\": \"Invoices\",\n\
   \"subtractEntitySet\": \"CreditNotes\" | null,\n\
   \"groupBy\": [\"DocDate\"],\n\
   \"metrics\": [{\"field\": \"DocTotal\", \"op\": \"sum\", \"alias\": \"Total\"}],\n\
-  \"filter\": {\"field\": \"DocDate\", \"op\": \"ge\", \"value\": \"2025-01-01\"} | null,\n\
+  \"filter\": [{\"field\": \"DocDate\", \"op\": \"ge\", \"value\": \"2015-01-01\"}, {\"field\": \"DocDate\", \"op\": \"le\", \"value\": \"2015-12-31\"}] | null,\n\
   \"timeWindow\": \"this_quarter\" | \"last_quarter\" | \"all\" | ... | null,\n\
+  \"cardCode\": \"C0001\" | null,\n\
+  \"docDate\": \"2026-10-04\" | null,\n\
+  \"lines\": [{\"itemCode\": \"A00001\", \"quantity\": 2, \"price\": 100}] | null,\n\
   \"clarifyingQuestion\": null | \"Which period — this quarter, last quarter, or all time?\",\n\
   \"summary\": \"one line for the user, in plain language\"\n\
 }\n\n\
 Rules:\n\
 - \"answer\" = no query. Put your conversational reply in summary. Use it for greetings,\n\
   thanks, general questions, or questions that are not about the user's ERP data.\n\
+- \"detail\" = list entities from any SAP entity set, meaningful fields only. Use for\n\
+  \"show me employees\", \"list items\", \"customer details\". entitySet names a set;\n\
+  the executor picks which fields to show. filter narrows it.\n\
+- \"create\" = build a sales or purchase document, never post it. entitySet names a\n\
+  document set (Orders, Invoices, PurchaseOrders, …); cardCode the customer or\n\
+  supplier; lines the items with quantity and optional price. The app shows a\n\
+  confirmation before anything is posted. Gather item and customer choices first.\n\
+- \"copy\" = copy a source document into its twin (Orders -> Invoices,\n\
+  PurchaseOrders -> PurchaseInvoices). entitySet names the source; filter DocNum\n\
+  eq names the document to copy. The app shows a confirmation before posting.\n\
 - If the question needs a time window or a choice and none is given, set kind to \"clarify\" and\n\
   put the question in clarifyingQuestion. Never guess a period.\n\
-- Prefer timeWindow over filter for date ranges; only set filter for non-date conditions.\n\
+- Use timeWindow for the named periods (this_quarter, last_year, last_30_days…).\n\
+  For a range the user names explicitly (\"in 2015\", \"from March to June\", \"this fiscal\n\
+  year\"), use a filter on DocDate with ge/le — one condition per bound. filter and\n\
+  timeWindow may combine; both are ANDed.\n\
 - \"count\" uses the metrics array with op \"count\" and ignores the field; entitySet can be a\n\
   count-only set such as EmployeesInfo.\n\
 - groupBy may be empty for a plain total, or one or more of the listed fields.\n\
@@ -421,6 +526,34 @@ fn as_filter(v: &Value) -> Option<FilterSpec> {
     Some(FilterSpec { field, op, value })
 }
 
+/// Lines of a create plan, one object per document line.
+fn as_lines(v: &Value) -> Vec<LineSpec> {
+    let items: Vec<&Value> = match v {
+        Value::Array(a) => a.iter().collect(),
+        Value::Null => Vec::new(),
+        other => vec![other],
+    };
+    items
+        .into_iter()
+        .filter_map(|m| {
+            let item_code = m.get("itemCode").and_then(as_string).unwrap_or_default();
+            let quantity = m.get("quantity").and_then(Value::as_f64).unwrap_or(0.0);
+            let price = m.get("price").and_then(Value::as_f64);
+            Some(LineSpec { item_code, quantity, price })
+        })
+        .collect()
+}
+
+/// One filter or a list of them: the model may emit `"filter": {…}` or
+/// `"filters": [{…}, …]`. Both become the same `Vec`.
+fn as_filters(v: &Value) -> Vec<FilterSpec> {
+    match v {
+        Value::Array(a) => a.iter().filter_map(as_filter).collect(),
+        Value::Null => Vec::new(),
+        other => as_filter(other).into_iter().collect(),
+    }
+}
+
 /// Builds a plan field by field with coercion, so one odd shape does not discard
 /// an otherwise usable plan.
 fn plan_from_value(v: &Value) -> Plan {
@@ -433,8 +566,15 @@ fn plan_from_value(v: &Value) -> Plan {
         subtract_entity_set: v.get("subtractEntitySet").and_then(as_string),
         group_by: v.get("groupBy").map(as_string_list).unwrap_or_default(),
         metrics: v.get("metrics").map(as_metrics).unwrap_or_default(),
-        filter: v.get("filter").filter(|f| !f.is_null()).and_then(as_filter),
+        filter: v
+            .get("filters")
+            .or_else(|| v.get("filter"))
+            .map(as_filters)
+            .unwrap_or_default(),
         time_window: v.get("timeWindow").and_then(as_time_window),
+        card_code: v.get("cardCode").and_then(as_string),
+        doc_date: v.get("docDate").and_then(as_string),
+        lines: v.get("lines").map(as_lines).unwrap_or_default(),
         clarifying_question: v.get("clarifyingQuestion").and_then(as_string),
         summary: v.get("summary").and_then(as_string).unwrap_or_default(),
     }
@@ -455,8 +595,11 @@ mod tests {
                 op: "sum".into(),
                 alias: "Total".into(),
             }],
-            filter: None,
+            filter: vec![],
             time_window: Some(TimeWindow::LastQuarter),
+            card_code: None,
+            doc_date: None,
+            lines: vec![],
             clarifying_question: None,
             summary: "Sum Invoices by month for last quarter.".into(),
         }
@@ -502,23 +645,79 @@ mod tests {
     #[test]
     fn an_unknown_filter_op_is_rejected() {
         let mut p = valid_plan();
-        p.filter = Some(FilterSpec {
+        p.filter = vec![FilterSpec {
             field: "DocDate".into(),
             op: "like".into(),
             value: "x".into(),
-        });
+        }];
         assert!(p.validated().is_err());
     }
 
     #[test]
     fn a_filter_on_a_non_report_field_is_rejected() {
         let mut p = valid_plan();
-        p.filter = Some(FilterSpec {
+        p.filter = vec![FilterSpec {
             field: "U_MyField".into(),
             op: "eq".into(),
             value: "x".into(),
-        });
+        }];
         assert!(p.validated().is_err());
+    }
+
+    #[test]
+    fn a_detail_plan_validates_against_the_catalogue() {
+        let p = Plan {
+            kind: "detail".into(),
+            entity_set: Some("EmployeesInfo".into()),
+            ..Default::default()
+        };
+        assert_eq!(p.parsed_kind(), PlanKind::Detail);
+        assert!(p.validated().is_ok(), "{:?}", p.validated());
+    }
+
+    #[test]
+    fn a_detail_plan_rejects_an_unknown_set() {
+        let p = Plan {
+            kind: "detail".into(),
+            entity_set: Some("NotASet".into()),
+            ..Default::default()
+        };
+        assert!(p.validated().is_err());
+    }
+
+    #[test]
+    fn a_create_plan_validates_and_rejects_bad_lines() {
+        let good = Plan {
+            kind: "create".into(),
+            entity_set: Some("Orders".into()),
+            card_code: Some("C0001".into()),
+            lines: vec![LineSpec { item_code: "A00001".into(), quantity: 2.0, price: Some(100.0) }],
+            ..Default::default()
+        };
+        assert!(good.validated().is_ok(), "{:?}", good.validated());
+        let mut bad = good.clone();
+        bad.lines[0].quantity = 0.0;
+        assert!(bad.validated().is_err());
+        let mut bad_set = good.clone();
+        bad_set.entity_set = Some("NotADoc".into());
+        assert!(bad_set.validated().is_err());
+    }
+
+    #[test]
+    fn a_copy_plan_validates_and_needs_a_source_number() {
+        let good = Plan {
+            kind: "copy".into(),
+            entity_set: Some("Orders".into()),
+            filter: vec![FilterSpec { field: "DocNum".into(), op: "eq".into(), value: "123".into() }],
+            ..Default::default()
+        };
+        assert!(good.validated().is_ok(), "{:?}", good.validated());
+        let mut bad_set = good.clone();
+        bad_set.entity_set = Some("Invoices".into());
+        assert!(bad_set.validated().is_err());
+        let mut no_num = good.clone();
+        no_num.filter = vec![];
+        assert!(no_num.validated().is_err());
     }
 
     #[test]
@@ -529,8 +728,11 @@ mod tests {
             subtract_entity_set: None,
             group_by: vec![],
             metrics: vec![],
-            filter: None,
+            filter: vec![],
             time_window: None,
+            card_code: None,
+            doc_date: None,
+            lines: vec![],
             clarifying_question: Some("Which period?".into()),
             summary: "Need a period.".into(),
         };
@@ -576,6 +778,43 @@ mod tests {
         assert_eq!(p.group_by, vec!["DocDate".to_string()]);
         assert_eq!(p.time_window, Some(TimeWindow::LastMonth));
         assert_eq!(p.summary, "Sales for last month");
+        assert!(p.validated().is_ok(), "{:?}", p.validated());
+    }
+
+    #[test]
+    fn a_filter_array_parses_and_validates() {
+        let raw = r#"{
+            "kind": "aggregate",
+            "entitySet": "Invoices",
+            "subtractEntitySet": "CreditNotes",
+            "groupBy": [],
+            "metrics": [{"field": "DocTotal", "op": "sum", "alias": "Total"}],
+            "filter": [{"field": "DocDate", "op": "ge", "value": "2015-01-01"}, {"field": "DocDate", "op": "le", "value": "2015-12-31"}],
+            "timeWindow": null,
+            "clarifyingQuestion": null,
+            "summary": "Net sales for 2015"
+        }"#;
+        let p = parse_plan_json(raw).unwrap();
+        assert_eq!(p.filter.len(), 2);
+        assert_eq!(p.filter[0].op, "ge");
+        assert_eq!(p.filter[1].value, "2015-12-31");
+        assert!(p.validated().is_ok(), "{:?}", p.validated());
+    }
+
+    #[test]
+    fn a_single_object_filter_is_coerced_to_a_list() {
+        let raw = r#"{
+            "kind": "aggregate",
+            "entitySet": "Invoices",
+            "groupBy": [],
+            "metrics": [{"field": "DocTotal", "op": "sum", "alias": "Total"}],
+            "filter": {"field": "DocumentStatus", "op": "eq", "value": "bost_Open"},
+            "timeWindow": null,
+            "clarifyingQuestion": null,
+            "summary": "Open invoices"
+        }"#;
+        let p = parse_plan_json(raw).unwrap();
+        assert_eq!(p.filter.len(), 1);
         assert!(p.validated().is_ok(), "{:?}", p.validated());
     }
 

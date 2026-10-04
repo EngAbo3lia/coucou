@@ -6,7 +6,7 @@
 use serde_json::{json, Value};
 
 const MAX_TOKENS: u32 = 4096;
-const TIMEOUT_SECS: u64 = 90;
+const TIMEOUT_SECS: u64 = 180;
 
 fn client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
@@ -38,6 +38,12 @@ fn api_error(status: reqwest::StatusCode, text: &str) -> String {
 }
 
 /// One non-streaming chat completion. Returns the assistant's text.
+///
+/// OpenAI-compatible providers (OpenRouter, DeepSeek) can drop the connection
+/// mid-response under load; reqwest then reports a body decode error ("error
+/// decoding response body"). A slow model can also run past the timeout during
+/// the body read. Both are transient, so the request is retried once before the
+/// error is surfaced.
 pub async fn chat(
     base_url: &str,
     key: Option<&str>,
@@ -50,37 +56,54 @@ pub async fn chat(
         "messages": messages,
     });
 
-    let response = with_auth(
-        client()?.post(format!("{base_url}/chat/completions")),
-        key,
-    )
-    .json(&body)
-    .send()
-    .await
-    .map_err(|e| format!("Network error: {e}"))?;
+    let mut attempt_err = String::from("request failed");
+    for attempt in 0..2 {
+        let response = match with_auth(client()?.post(format!("{base_url}/chat/completions")), key)
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                attempt_err = format!("Network error: {e}");
+                if attempt == 0 { continue; }
+                return Err(attempt_err);
+            }
+        };
+        let status = response.status();
+        let text = match response.text().await {
+            Ok(t) => t,
+            Err(e) => {
+                let msg = e.to_string();
+                if attempt == 0 {
+                    attempt_err = msg;
+                    continue;
+                }
+                return Err(msg);
+            }
+        };
+        if !status.is_success() {
+            return Err(api_error(status, &text));
+        }
 
-    let status = response.status();
-    let text = response.text().await.map_err(|e| e.to_string())?;
-    if !status.is_success() {
-        return Err(api_error(status, &text));
+        let json: Value = serde_json::from_str(&text).map_err(|e| format!("Bad API response: {e}"))?;
+        let content = json
+            .get("choices")
+            .and_then(Value::as_array)
+            .and_then(|c| c.first())
+            .and_then(|c| c.get("message"))
+            .and_then(|m| m.get("content"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+
+        if content.is_empty() {
+            return Err("No response text.".into());
+        }
+        return Ok(content);
     }
-
-    let json: Value = serde_json::from_str(&text).map_err(|e| format!("Bad API response: {e}"))?;
-    let content = json
-        .get("choices")
-        .and_then(Value::as_array)
-        .and_then(|c| c.first())
-        .and_then(|c| c.get("message"))
-        .and_then(|m| m.get("content"))
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim()
-        .to_string();
-
-    if content.is_empty() {
-        return Err("No response text.".into());
-    }
-    Ok(content)
+    Err(attempt_err)
 }
 
 /// Live model list for the picker. Works with every OpenAI-compatible `/models`

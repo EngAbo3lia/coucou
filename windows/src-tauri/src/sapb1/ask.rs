@@ -17,8 +17,10 @@ use std::collections::HashMap;
 use serde::Serialize;
 use serde_json::Value;
 
+use super::catalogue;
 use super::dates;
-use super::planner::{self, ChatTurn, Plan, PlanKind};
+use super::documents;
+use super::planner::{self, ChatTurn, FilterSpec, Plan, PlanKind};
 use super::query;
 use super::transport::{self, Credentials};
 use crate::settings::Settings;
@@ -30,6 +32,14 @@ const ROW_CAP: usize = 5000;
 pub struct AnswerRow {
     pub label: String,
     pub value: f64,
+}
+
+/// A clickable choice in the chat (an item or customer the user can pick).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PickOption {
+    pub value: String,
+    pub label: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -44,10 +54,14 @@ pub struct Answer {
     pub partial: bool,
     /// Which data produced this, so the figure can be trusted or challenged.
     pub source: String,
-    /// "result" | "clarify" | "answer".
+    /// "result" | "clarify" | "answer" | "confirm".
     pub kind: String,
     /// The "what I'll do" bubble, shown before a result.
     pub plan: Option<String>,
+    /// For kind "confirm": the document spec to post after the user confirms.
+    pub payload: Option<Value>,
+    /// Clickable choices (items/customers) the user can pick in the chat.
+    pub options: Vec<PickOption>,
     /// The question the assistant needs answered before it can run.
     pub clarifying_question: Option<String>,
     /// Kept for wire compatibility; the planner path never fills it.
@@ -65,6 +79,8 @@ impl Default for Answer {
             source: String::new(),
             kind: "result".into(),
             plan: None,
+            payload: None,
+            options: vec![],
             clarifying_question: None,
             suggestions: vec![],
         }
@@ -146,6 +162,9 @@ async fn execute(c: &Credentials, plan: &Plan) -> Result<Answer, String> {
                 grouped(c, plan, range).await
             }
         }
+        PlanKind::Detail => detail_plan(c, plan, range).await,
+        PlanKind::Create => create_plan(c, plan).await,
+        PlanKind::Copy => copy_plan(c, plan).await,
         PlanKind::Answer => Ok(answer_reply(plan)),
         PlanKind::Clarify => Err("The plan still needs a clarifying answer.".into()),
     }
@@ -191,18 +210,30 @@ fn is_iso_date(v: &str) -> bool {
         && v[8..].bytes().all(|b| b.is_ascii_digit())
 }
 
+/// Whether the set carries a `DocDate` field, in the report allowlist or the
+/// live catalogue. Used to know if a date range can be applied to the rows.
+fn set_has_date(set: &str) -> bool {
+    query::is_report_field(set, "DocDate") || catalogue::has_field(set, "DocDate")
+}
+
 /// Fetches rows for a set, then filters them by the date range (if any) on the
-/// `DocDate` field. The dataset is small enough to page once; the row cap is a
-/// lower-bound guard, not a filter.
+/// `DocDate` field and by the plan's ANDed conditions. The dataset is small
+/// enough to page once; the row cap is a lower-bound guard, not a filter.
 async fn fetch_rows(
     c: &Credentials,
     set: &str,
     select: &[String],
     range: &Option<(String, String)>,
+    filters: &[FilterSpec],
 ) -> Result<(Vec<Value>, bool), String> {
     let mut fields = select.to_vec();
-    if range.is_some() && !fields.iter().any(|f| f == "DocDate") && query::is_report_field(set, "DocDate") {
+    if range.is_some() && !fields.iter().any(|f| f == "DocDate") && set_has_date(set) {
         fields.push("DocDate".into());
+    }
+    for f in filters {
+        if !fields.iter().any(|x| x == &f.field) && query::is_report_field(set, &f.field) {
+            fields.push(f.field.clone());
+        }
     }
     let select = fields.join(",");
     let query = if select.is_empty() {
@@ -212,18 +243,47 @@ async fn fetch_rows(
     };
     let rows = transport::get(c, &query).await?;
     let list = rows.get("value").and_then(Value::as_array).cloned().unwrap_or_default();
-    let filtered: Vec<Value> = if let Some((start, end)) = range {
-        list.into_iter()
-            .filter(|r| {
+    let filtered: Vec<Value> = list
+        .into_iter()
+        .filter(|r| {
+            if let Some((start, end)) = range {
                 let date = r.get("DocDate").and_then(Value::as_str).unwrap_or("");
-                date.is_empty() || (date >= start.as_str() && date <= end.as_str())
-            })
-            .collect()
-    } else {
-        list
-    };
+                if !(date.is_empty() || (date >= start.as_str() && date <= end.as_str())) {
+                    return false;
+                }
+            }
+            filters.iter().all(|f| row_matches(r, f))
+        })
+        .collect();
     let partial = filtered.len() >= ROW_CAP;
     Ok((filtered, partial))
+}
+
+/// Whether a fetched row satisfies one filter condition. Values compare as
+/// numbers when both sides parse as one, else as strings (ISO dates, enum
+/// words, codes). The field was validated against the report allowlist.
+fn row_matches(row: &Value, f: &FilterSpec) -> bool {
+    let Some(cell) = row.get(&f.field) else { return false };
+    let value = f.value.trim();
+    if let (Some(c), Ok(nv)) = (cell.as_f64(), value.parse::<f64>()) {
+        return match f.op.as_str() {
+            "eq" => (c - nv).abs() < 1e-9,
+            "ge" => c >= nv,
+            "gt" => c > nv,
+            "le" => c <= nv,
+            "lt" => c < nv,
+            _ => false,
+        };
+    }
+    let c = cell.as_str().unwrap_or("");
+    match f.op.as_str() {
+        "eq" => c == value,
+        "ge" => c >= value,
+        "gt" => c > value,
+        "le" => c <= value,
+        "lt" => c < value,
+        _ => false,
+    }
 }
 
 fn metric_field(plan: &Plan) -> String {
@@ -262,13 +322,13 @@ async fn aggregate_total(
         return Err("The plan has no metric.".into());
     };
     let select = vec![metric.field.clone()];
-    let (rows, partial) = fetch_rows(c, set, &select, &range).await?;
+    let (rows, partial) = fetch_rows(c, set, &select, &range, &plan.filter).await?;
     let mut value = aggregate_rows(&rows, &metric.field, &metric.op, None).unwrap_or(0.0);
 
     // A net figure (sales minus credit notes, purchases minus purchase credit
     // notes) subtracts the same window from a second set.
     if let Some(sub) = &plan.subtract_entity_set {
-        let (sub_rows, _) = fetch_rows(c, sub, &select, &range).await?;
+        let (sub_rows, _) = fetch_rows(c, sub, &select, &range, &plan.filter).await?;
         value -= aggregate_rows(&sub_rows, &metric.field, &metric.op, None).unwrap_or(0.0);
     }
 
@@ -304,7 +364,7 @@ async fn grouped(
     };
     let mut select: Vec<String> = dims.clone();
     select.push(metric.field.clone());
-    let (rows, partial) = fetch_rows(c, set, &select, &range).await?;
+    let (rows, partial) = fetch_rows(c, set, &select, &range, &plan.filter).await?;
 
     let mut groups: HashMap<String, f64> = HashMap::new();
     for r in &rows {
@@ -371,7 +431,7 @@ async fn count_with_filter(
         filter.push(format!("DocDate ge datetime'{start}'"));
         filter.push(format!("DocDate le datetime'{end}'"));
     }
-    if let Some(f) = &plan.filter {
+    for f in &plan.filter {
         // The field and op were validated; the value is sanitised here.
         filter.push(format!("{} {} {}", f.field, f.op, filter_literal(&f.value)?));
     }
@@ -391,10 +451,18 @@ async fn list_plan(
 ) -> Result<Answer, String> {
     let set = plan.entity_set.as_deref().unwrap_or("");
     let source = build_source(plan, &range);
-    let (rows, partial) = fetch_rows(c, set, &[], &range).await?;
     let label_field = pick_label_field(set);
     let value_field = metric_field(plan);
     let value_field = if value_field.is_empty() { "DocTotal".to_string() } else { value_field };
+    // Never fetch full document rows: a `list` over a wide set (Invoices) can be
+    // tens of MB, which the server truncates and reqwest reports as a body
+    // decode error. Select only the label, the value and (via `fetch_rows`) the
+    // date bound, so the response stays small.
+    let mut select = vec![label_field.clone(), value_field.clone()];
+    if select[0] == select[1] {
+        select.pop();
+    }
+    let (rows, partial) = fetch_rows(c, set, &select, &range, &plan.filter).await?;
     let mut out: Vec<AnswerRow> = rows
         .iter()
         .filter_map(|r| {
@@ -430,6 +498,295 @@ fn pick_label_field(set: &str) -> String {
         }
     }
     "DocNum".to_string()
+}
+
+/// A list of entities from any SAP entity set: meaningful, non-empty fields only.
+/// The model names the set; the executor picks the fields, fetches, and renders a
+/// readable block rather than dumping the raw response.
+async fn detail_plan(
+    c: &Credentials,
+    plan: &Plan,
+    range: Option<(String, String)>,
+) -> Result<Answer, String> {
+    let set = plan.entity_set.as_deref().unwrap_or("");
+    let fields = resolve_detail_fields(c, set).await?;
+    if fields.is_empty() {
+        return Err(format!("No meaningful fields to show for {set}."));
+    }
+    let source = build_source(plan, &range);
+    let (rows, partial) = fetch_rows(c, set, &fields, &range, &plan.filter).await?;
+
+    let lines: Vec<String> = rows
+        .iter()
+        .take(ROW_CAP.min(50))
+        .filter_map(|r| {
+            let mut parts: Vec<String> = Vec::new();
+            for f in &fields {
+                let s = value_text(r.get(f.as_str()));
+                if !s.is_empty() {
+                    parts.push(format!("{}: {s}", friendly_field(f)));
+                }
+            }
+            if parts.is_empty() {
+                None
+            } else {
+                Some(parts.join(" · "))
+            }
+        })
+        .collect();
+
+    let title = format!("{} — detail", friendly_set(set));
+    let text = if lines.is_empty() {
+        "No matching records.".to_string()
+    } else {
+        lines.join("\n")
+    };
+
+    // Clickable choices: the code as the value, the name as the label.
+    let code_field = fields.iter().find(|f| f.ends_with("Code") || f.ends_with("Num")).cloned();
+    let name_field = fields.iter().find(|f| f.ends_with("Name")).cloned();
+    let options: Vec<PickOption> = rows
+        .iter()
+        .filter_map(|r| {
+            let value = code_field.as_ref().map(|f| value_text(r.get(f.as_str()))).unwrap_or_default();
+            if value.is_empty() {
+                return None;
+            }
+            let label = name_field.as_ref().map(|f| value_text(r.get(f.as_str()))).unwrap_or_default();
+            let label = if label.is_empty() { value.clone() } else { label };
+            Some(PickOption { value, label })
+        })
+        .collect();
+
+    Ok(Answer {
+        title: title.clone(),
+        text,
+        partial,
+        source,
+        plan: Some(title),
+        options,
+        ..Answer::default()
+    })
+}
+
+/// Fields to show: the catalogue type when known, else discovered from one probe
+/// row (a set like `EmployeesInfo` has no type in the offline catalogue).
+async fn resolve_detail_fields(c: &Credentials, set: &str) -> Result<Vec<String>, String> {
+    if let Some(t) = catalogue::type_for_set(set) {
+        return Ok(pick_detail_fields(t));
+    }
+    discover_detail_fields(c, set).await
+}
+
+/// Auto-picks a handful of meaningful fields for a type: identity, label, date
+/// and code fields first. Never returns the whole wide document.
+fn pick_detail_fields(t: &catalogue::EntityType) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for p in t.properties {
+        if out.len() >= 6 {
+            break;
+        }
+        let n = p.name;
+        if n.ends_with("Code") || n.ends_with("Name") || n.ends_with("Number")
+            || n.ends_with("Num") || n.ends_with("Date") || n.ends_with("Time")
+        {
+            out.push(n.to_string());
+        }
+    }
+    if out.is_empty() {
+        out.extend(t.properties.iter().take(4).map(|p| p.name.to_string()));
+    }
+    out
+}
+
+/// Reads the field names of one row so a set whose type is unknown still gets
+/// meaningful, real fields rather than a guess. `$top=1` keeps it cheap.
+async fn discover_detail_fields(c: &Credentials, set: &str) -> Result<Vec<String>, String> {
+    let rows = transport::get(c, &format!("{set}?$top=1")).await?;
+    let first = rows
+        .get("value")
+        .and_then(Value::as_array)
+        .and_then(|a| a.first());
+    let Some(first) = first else {
+        return Ok(Vec::new());
+    };
+    let mut out: Vec<String> = Vec::new();
+    for key in first.as_object().map(|o| o.keys()).into_iter().flatten() {
+        if out.len() >= 6 {
+            break;
+        }
+        if key.ends_with("Code") || key.ends_with("Name") || key.ends_with("Number")
+            || key.ends_with("Num") || key.ends_with("Date") || key.ends_with("Time")
+        {
+            out.push(key.clone());
+        }
+    }
+    if out.is_empty() {
+        out.extend(
+            first
+                .as_object()
+                .map(|o| o.keys().take(4).cloned())
+                .into_iter()
+                .flatten(),
+        );
+    }
+    Ok(out)
+}
+
+/// A human label for a field, so a detail line reads as a fact, not a column.
+fn friendly_field(field: &str) -> &str {
+    match field {
+        "CardCode" => "Customer code",
+        "CardName" => "Customer",
+        "CardType" => "Customer type",
+        "ItemCode" => "Item code",
+        "ItemName" => "Item",
+        "ItemsGroupCode" => "Item group",
+        "DocNum" => "Number",
+        "DocEntry" => "Entry",
+        "DocDate" => "Date",
+        "DocTotal" => "Total",
+        "FirstName" => "First name",
+        "LastName" => "Last name",
+        "EmployeeID" => "Employee ID",
+        "Email" => "Email",
+        "Department" => "Department",
+        _ => field,
+    }
+}
+
+/// Text of a JSON cell, empty for null/missing so a detail line drops blank facts.
+fn value_text(v: Option<&Value>) -> String {
+    match v {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Number(n)) => n.to_string(),
+        Some(Value::Bool(b)) => b.to_string(),
+        _ => String::new(),
+    }
+}
+
+/// Builds a sales or purchase document from a validated plan and returns a
+/// preview. Nothing is posted here: the app shows the preview and asks for an
+/// explicit confirm, then calls the post command.
+async fn create_plan(_c: &Credentials, plan: &Plan) -> Result<Answer, String> {
+    let set = plan.entity_set.as_deref().unwrap_or("");
+    let doc_type = documents::find_by_set(set)
+        .ok_or_else(|| format!("{set} is not a document type I can create."))?;
+    let lines: Vec<documents::Line> = plan
+        .lines
+        .iter()
+        .map(|l| documents::Line {
+            item_code: l.item_code.clone(),
+            quantity: l.quantity,
+            price: l.price,
+        })
+        .collect();
+    let doc = documents::Document {
+        doc_type,
+        card_code: plan.card_code.clone().unwrap_or_default(),
+        doc_date: plan.doc_date.clone(),
+        lines,
+    };
+    documents::validate(&doc)?;
+
+    // The spec the app posts after the user confirms. Carried in the answer so
+    // the frontend does not have to reconstruct what the model already decided.
+    let spec = serde_json::json!({
+        "set": set,
+        "cardCode": doc.card_code,
+        "docDate": doc.doc_date,
+        "lines": doc.lines.iter().map(|l| serde_json::json!({
+            "itemCode": l.item_code,
+            "quantity": l.quantity,
+            "price": l.price,
+        })).collect::<Vec<_>>(),
+    });
+
+    let title = format!("Create {}", doc_type.name);
+    let text = format!("{}\n\nConfirm to post to the test company.", documents::preview_text(&doc));
+    Ok(Answer {
+        title: title.clone(),
+        text,
+        kind: "confirm".into(),
+        plan: Some(title),
+        source: "preview — not posted".into(),
+        payload: Some(spec),
+        ..Answer::default()
+    })
+}
+
+/// Copies a source document (order) into its twin (invoice): fetch the source,
+/// map its card and lines, and return a preview. Nothing is posted here.
+async fn copy_plan(c: &Credentials, plan: &Plan) -> Result<Answer, String> {
+    let source = plan.entity_set.as_deref().unwrap_or("");
+    let target = documents::copy_target(source)
+        .ok_or_else(|| format!("{source} cannot be copied to a document."))?;
+    let num = plan
+        .filter
+        .iter()
+        .find(|f| f.field == "DocNum")
+        .map(|f| f.value.trim_matches('"').to_string())
+        .ok_or("No source document number.")?;
+
+    let query = format!("{source}?$filter=DocNum eq {num}&$select=DocEntry&$top=1");
+    let found = transport::get(c, &query).await?;
+    let entry = found
+        .get("value")
+        .and_then(Value::as_array)
+        .and_then(|a| a.first())
+        .and_then(|d| d.get("DocEntry"))
+        .and_then(Value::as_i64)
+        .ok_or_else(|| format!("No {source} with number {num}."))?;
+
+    // Lines come only on the single-entity GET, not on a list query, and
+    // `$expand=DocumentLines` is rejected by this server.
+    let src = transport::get(c, &format!("{source}({entry})")).await?;
+
+    let card_code = src.get("CardCode").and_then(Value::as_str).unwrap_or("").to_string();
+    let doc_date = src.get("DocDate").and_then(Value::as_str).map(|s| s.to_string());
+    let lines: Vec<documents::Line> = src
+        .get("DocumentLines")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|l| {
+                    let item_code = l.get("ItemCode").and_then(Value::as_str).unwrap_or("").to_string();
+                    if item_code.is_empty() {
+                        return None;
+                    }
+                    let quantity = l.get("Quantity").and_then(Value::as_f64).unwrap_or(0.0);
+                    let price = l.get("UnitPrice").and_then(Value::as_f64);
+                    Some(documents::Line { item_code, quantity, price })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let doc = documents::Document { doc_type: target, card_code, doc_date, lines };
+    documents::validate(&doc)?;
+
+    let spec = serde_json::json!({
+        "set": target.set,
+        "cardCode": doc.card_code,
+        "docDate": doc.doc_date,
+        "lines": doc.lines.iter().map(|l| serde_json::json!({
+            "itemCode": l.item_code,
+            "quantity": l.quantity,
+            "price": l.price,
+        })).collect::<Vec<_>>(),
+    });
+
+    let title = format!("Copy {source} to {}", target.name);
+    let text = format!("{}\n\nConfirm to post to the test company.", documents::preview_text(&doc));
+    Ok(Answer {
+        title: title.clone(),
+        text,
+        kind: "confirm".into(),
+        plan: Some(title),
+        source: "preview — not posted".into(),
+        payload: Some(spec),
+        ..Answer::default()
+    })
 }
 
 /// Sums or averages the rows over one field, optionally grouped.
@@ -616,6 +973,18 @@ mod tests {
     }
 
     #[test]
+    fn row_matches_filters_dates_numbers_and_enums() {
+        let row = serde_json::json!({ "DocDate": "2015-06-15", "DocTotal": 120.0, "DocumentStatus": "bost_Open" });
+        let date = |op: &str, v: &str| FilterSpec { field: "DocDate".into(), op: op.into(), value: v.into() };
+        assert!(row_matches(&row, &date("ge", "2015-01-01")));
+        assert!(row_matches(&row, &date("le", "2015-12-31")));
+        assert!(!row_matches(&row, &date("le", "2015-01-01")));
+        assert!(row_matches(&row, &FilterSpec { field: "DocTotal".into(), op: "gt".into(), value: "100".into() }));
+        assert!(row_matches(&row, &FilterSpec { field: "DocumentStatus".into(), op: "eq".into(), value: "bost_Open".into() }));
+        assert!(!row_matches(&row, &FilterSpec { field: "DocumentStatus".into(), op: "eq".into(), value: "bost_Close".into() }));
+    }
+
+    #[test]
     fn titles_are_human_and_never_carry_placeholders() {
         let p = |kind: &str, set: &str, sub: Option<&str>, group: &[&str], w: Option<planner::TimeWindow>| {
             Plan {
@@ -624,8 +993,11 @@ mod tests {
                 subtract_entity_set: sub.map(|s| s.to_string()),
                 group_by: group.iter().map(|s| s.to_string()).collect(),
                 metrics: vec![MetricSpec { field: "DocTotal".into(), op: "sum".into(), alias: "Total".into() }],
-                filter: None,
+                filter: vec![],
                 time_window: w,
+                card_code: None,
+                doc_date: None,
+                lines: vec![],
                 clarifying_question: None,
                 summary: "You had a total value of <total> across <count> orders.".into(),
             }

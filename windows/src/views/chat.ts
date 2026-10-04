@@ -3,14 +3,14 @@
 
 import { h, svg, clear } from "./dom";
 import { ICONS } from "./icons";
-import { Bridge, type ChatContext, type SapB1Answer } from "../core/bridge";
+import { Bridge, type ChatContext, type SapB1Answer, type SapB1DocumentSpec } from "../core/bridge";
 import { Sound } from "../core/sound";
 import { State, type ChatMessage } from "../core/state";
 import type { ViewHost } from "./views";
 
 let nextId = 1;
 
-function bubble(message: ChatMessage): HTMLElement {
+function bubble(message: ChatMessage, onPick?: (value: string) => void): HTMLElement {
   if (message.role === "user") {
     return h(
       "div",
@@ -31,14 +31,14 @@ function bubble(message: ChatMessage): HTMLElement {
     return h(
       "div",
       { class: "chat-row" },
-      reportCard(message.report),
+      reportCard(message.report, onPick),
     );
   }
   return h("div", { class: "chat-row" }, h("div", { class: "reply", text: message.content }));
 }
 
 /** A result rendered as a report: title, a bar chart, and the total. */
-function reportCard(a: SapB1Answer): HTMLElement {
+function reportCard(a: SapB1Answer, onPick?: (value: string) => void): HTMLElement {
   const card = h("div", { class: "report" });
   const title = h("div", { class: "report-title", text: a.title });
   card.append(title);
@@ -75,6 +75,16 @@ function reportCard(a: SapB1Answer): HTMLElement {
   if (a.text && a.text !== a.title && a.rows.length === 0) {
     card.append(h("div", { class: "report-note", text: a.text }));
   }
+
+  // Clickable choices: tapping one sends its value as the next message, so the
+  // user picks an item or customer instead of typing a code.
+  if (a.options.length > 0 && onPick) {
+    const picks = h("div", { class: "picks" });
+    for (const o of a.options) {
+      picks.append(h("button", { class: "pick", text: o.label, onclick: () => onPick(o.value) }));
+    }
+    card.append(picks);
+  }
   return card;
 }
 
@@ -83,6 +93,77 @@ function money(v: number): string {
   const [whole, cents] = Math.abs(v).toFixed(2).split(".");
   const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
   return `${neg ? "-" : ""}${grouped}.${cents}`;
+}
+
+/** Asks for an explicit confirm before a document is posted, and lets the user
+ *  set each line's quantity and price. No silent create. */
+function confirmDocument(a: SapB1Answer): Promise<SapB1DocumentSpec | null> {
+  return new Promise((resolve) => {
+    const spec = a.payload;
+    const d = h("dialog", { class: "confirm" });
+    d.append(h("div", { class: "confirm-title", text: a.title }));
+
+    const editors: { qty: HTMLInputElement; price: HTMLInputElement }[] = [];
+    if (spec) {
+      const list = h("div", { class: "confirm-lines" });
+      for (const line of spec.lines) {
+        const qty = h("input", {
+          class: "confirm-input", type: "number", min: "0", step: "1",
+          value: String(line.quantity),
+        }) as HTMLInputElement;
+        const price = h("input", {
+          class: "confirm-input", type: "number", min: "0", step: "0.01",
+          value: line.price != null ? String(line.price) : "",
+        }) as HTMLInputElement;
+        list.append(
+          h("div", { class: "confirm-line" },
+            h("span", { class: "confirm-item", text: line.itemCode }),
+            qty, price,
+          ),
+        );
+        editors.push({ qty, price });
+      }
+      d.append(
+        h("div", { class: "confirm-cols" },
+          h("span", { text: "Item" }), h("span", { text: "Qty" }), h("span", { text: "Price" }),
+        ),
+        list,
+        h("div", { class: "confirm-hint", text: `${spec.cardCode}${spec.docDate ? ` · ${spec.docDate}` : ""}` }),
+      );
+    } else {
+      d.append(h("div", { class: "confirm-body", text: a.text }));
+    }
+
+    const actions = h("div", { class: "confirm-actions" });
+    const cancel = h("button", {
+      class: "confirm-cancel", text: "Cancel",
+      onclick: () => { d.close(); resolve(null); },
+    });
+    const ok = h("button", {
+      class: "confirm-ok", text: "Create",
+      onclick: () => {
+        d.close();
+        if (!spec) { resolve(null); return; }
+        const lines = spec.lines.map((line, i) => ({
+          itemCode: line.itemCode,
+          quantity: Number(editors[i].qty.value) || 0,
+          price: editors[i].price.value.trim() === "" ? null : Number(editors[i].price.value),
+        }));
+        resolve({ ...spec, lines });
+      },
+    });
+    actions.append(cancel, ok);
+    d.append(actions);
+    document.body.append(d);
+    d.showModal();
+  });
+}
+
+/** A short confirmation after the server accepted the document. */
+function createdMessage(result: unknown): string {
+  const r = (result ?? {}) as Record<string, unknown>;
+  const num = r.DocNum ?? r.DocEntry;
+  return num != null ? `Created — document ${num}.` : "Created.";
 }
 
 function typingDots(): HTMLElement {
@@ -196,7 +277,15 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
           .map((m) => ({ role: m.role, content: m.content }));
         const answer = await Bridge.sapB1Ask(query, history);
         State.chatSuggestions = [];
-        if (answer.kind === "result") {
+        if (answer.kind === "confirm") {
+          // Show the preview, then ask for an explicit click before posting.
+          State.chatHistory.push({ id: nextId++, role: "assistant", content: answer.text });
+          const spec = await confirmDocument(answer);
+          if (spec) {
+            const result = await Bridge.sapB1CreateDocument(spec);
+            State.chatHistory.push({ id: nextId++, role: "assistant", content: createdMessage(result) });
+          }
+        } else if (answer.kind === "result") {
           // The plan bubble, then the report. Same turn, so they land together.
           if (answer.plan) {
             State.chatHistory.push({ id: nextId++, role: "assistant", content: answer.plan, plan: true });
@@ -273,7 +362,7 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
       if (count !== renderedCount) {
         renderedCount = count;
         clear(log);
-        for (const m of State.chatHistory) log.append(bubble(m));
+        for (const m of State.chatHistory) log.append(bubble(m, (v) => void submit(v)));
         if (thinking) log.append(typingDots());
         log.scrollTop = log.scrollHeight;
       }

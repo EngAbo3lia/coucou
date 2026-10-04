@@ -1,0 +1,195 @@
+//! SAP document types and payload building for the create path.
+//!
+//! Sales and purchase cycles mirror each other: each step in one has a twin in
+//! the other. This registry names the Service Layer entity set for each, so the
+//! executor posts to the right endpoint and the preview reads as a human label.
+
+use serde_json::{json, Value};
+
+/// One document type the assistant can create.
+#[derive(Debug, Clone)]
+pub struct DocumentType {
+    /// Stable id used by the planner (`"sales_order"`, `"ar_invoice"`, …).
+    pub kind: &'static str,
+    /// Service Layer entity set to `POST` to (`"Orders"`, `"Invoices"`, …).
+    pub set: &'static str,
+    /// Human name for the preview.
+    pub name: &'static str,
+    /// `"sales"` or `"purchase"`.
+    pub cycle: &'static str,
+}
+
+pub const DOCUMENT_TYPES: &[DocumentType] = &[
+    // Sales cycle
+    DocumentType { kind: "sales_quotation", set: "Quotations", name: "Sales quotation", cycle: "sales" },
+    DocumentType { kind: "sales_order", set: "Orders", name: "Sales order", cycle: "sales" },
+    DocumentType { kind: "delivery_note", set: "DeliveryNotes", name: "Delivery note", cycle: "sales" },
+    DocumentType { kind: "ar_invoice", set: "Invoices", name: "A/R invoice", cycle: "sales" },
+    DocumentType { kind: "ar_credit_memo", set: "CreditNotes", name: "A/R credit memo", cycle: "sales" },
+    DocumentType { kind: "sales_return", set: "Returns", name: "Sales return", cycle: "sales" },
+    // Purchase cycle
+    DocumentType { kind: "purchase_quotation", set: "PurchaseQuotations", name: "Purchase quotation", cycle: "purchase" },
+    DocumentType { kind: "purchase_order", set: "PurchaseOrders", name: "Purchase order", cycle: "purchase" },
+    DocumentType { kind: "goods_receipt", set: "PurchaseDeliveryNotes", name: "Goods receipt", cycle: "purchase" },
+    DocumentType { kind: "ap_invoice", set: "PurchaseInvoices", name: "A/P invoice", cycle: "purchase" },
+    DocumentType { kind: "ap_credit_memo", set: "PurchaseCreditNotes", name: "A/P credit memo", cycle: "purchase" },
+    DocumentType { kind: "purchase_return", set: "PurchaseReturns", name: "Purchase return", cycle: "purchase" },
+];
+
+pub fn find_by_kind(kind: &str) -> Option<&'static DocumentType> {
+    DOCUMENT_TYPES.iter().find(|d| d.kind == kind)
+}
+
+pub fn find_by_set(set: &str) -> Option<&'static DocumentType> {
+    DOCUMENT_TYPES.iter().find(|d| d.set == set)
+}
+
+/// The document a source is copied into: a sales order becomes an A/R invoice,
+/// a purchase order an A/P invoice. Only these two "copy to" links exist.
+pub fn copy_target(source_set: &str) -> Option<&'static DocumentType> {
+    match source_set {
+        "Orders" => find_by_kind("ar_invoice"),
+        "PurchaseOrders" => find_by_kind("ap_invoice"),
+        _ => None,
+    }
+}
+
+/// One line the assistant proposes.
+#[derive(Debug, Clone)]
+pub struct Line {
+    pub item_code: String,
+    pub quantity: f64,
+    pub price: Option<f64>,
+}
+
+/// A document the assistant wants to create, before it is posted.
+#[derive(Debug, Clone)]
+pub struct Document {
+    pub doc_type: &'static DocumentType,
+    pub card_code: String,
+    pub doc_date: Option<String>,
+    pub lines: Vec<Line>,
+}
+
+/// Builds the Service Layer `POST` body for a document.
+pub fn build_payload(doc: &Document) -> Value {
+    let doc_lines: Vec<Value> = doc
+        .lines
+        .iter()
+        .map(|l| {
+            let mut obj = serde_json::Map::new();
+            obj.insert("ItemCode".into(), json!(l.item_code));
+            obj.insert("Quantity".into(), json!(l.quantity));
+            if let Some(p) = l.price {
+                obj.insert("UnitPrice".into(), json!(p));
+            }
+            Value::Object(obj)
+        })
+        .collect();
+    let mut body = serde_json::Map::new();
+    body.insert("CardCode".into(), json!(doc.card_code));
+    if let Some(d) = &doc.doc_date {
+        body.insert("DocDate".into(), json!(d));
+    }
+    body.insert("DocumentLines".into(), json!(doc_lines));
+    Value::Object(body)
+}
+
+/// Validates a proposed document before it is shown or posted. Checks what is
+/// knowable offline (empty card, empty lines, bad quantities, unknown type).
+pub fn validate(doc: &Document) -> Result<(), String> {
+    if doc.card_code.trim().is_empty() {
+        return Err("No customer or supplier selected.".into());
+    }
+    if doc.lines.is_empty() {
+        return Err("No lines to post.".into());
+    }
+    for l in &doc.lines {
+        if l.item_code.trim().is_empty() {
+            return Err("A line has no item code.".into());
+        }
+        if !(l.quantity > 0.0) {
+            return Err(format!("Quantity for {} must be positive.", l.item_code));
+        }
+    }
+    Ok(())
+}
+
+/// A human-readable preview of a document, for the confirmation bubble.
+pub fn preview_text(doc: &Document) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("{} — {}", doc.doc_type.name, doc.card_code));
+    if let Some(d) = &doc.doc_date {
+        out.push_str(&format!(" ({d})"));
+    }
+    out.push('\n');
+    for l in &doc.lines {
+        let price = l.price.map(|p| format!(" @ {p}")).unwrap_or_default();
+        out.push_str(&format!("  {} × {}{}\n", l.item_code, l.quantity, price));
+    }
+    out.trim_end().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn doc() -> Document {
+        Document {
+            doc_type: find_by_kind("sales_order").unwrap(),
+            card_code: "C0001".into(),
+            doc_date: Some("2026-10-04".into()),
+            lines: vec![Line { item_code: "A00001".into(), quantity: 2.0, price: Some(100.0) }],
+        }
+    }
+
+    #[test]
+    fn every_sales_and_purchase_type_is_registered() {
+        for kind in ["sales_quotation", "sales_order", "delivery_note", "ar_invoice",
+            "ar_credit_memo", "sales_return", "purchase_quotation", "purchase_order",
+            "goods_receipt", "ap_invoice", "ap_credit_memo", "purchase_return"] {
+            assert!(find_by_kind(kind).is_some(), "{kind} is missing");
+        }
+        assert_eq!(find_by_set("Orders").unwrap().cycle, "sales");
+        assert_eq!(find_by_set("PurchaseInvoices").unwrap().cycle, "purchase");
+    }
+
+    #[test]
+    fn copy_target_maps_sales_and_purchase() {
+        assert_eq!(copy_target("Orders").unwrap().set, "Invoices");
+        assert_eq!(copy_target("PurchaseOrders").unwrap().set, "PurchaseInvoices");
+        assert!(copy_target("Invoices").is_none());
+    }
+
+    #[test]
+    fn payload_has_card_and_lines() {
+        let v = build_payload(&doc());
+        assert_eq!(v["CardCode"], json!("C0001"));
+        assert_eq!(v["DocDate"], json!("2026-10-04"));
+        assert_eq!(v["DocumentLines"][0]["ItemCode"], json!("A00001"));
+        assert_eq!(v["DocumentLines"][0]["Quantity"], json!(2.0));
+        assert_eq!(v["DocumentLines"][0]["UnitPrice"], json!(100.0));
+    }
+
+    #[test]
+    fn validate_rejects_empty_or_bad_documents() {
+        assert!(validate(&doc()).is_ok());
+        let mut d = doc();
+        d.card_code = "".into();
+        assert!(validate(&d).is_err());
+        d = doc();
+        d.lines.clear();
+        assert!(validate(&d).is_err());
+        d = doc();
+        d.lines[0].quantity = 0.0;
+        assert!(validate(&d).is_err());
+    }
+
+    #[test]
+    fn preview_reads_human() {
+        let p = preview_text(&doc());
+        assert!(p.contains("Sales order"));
+        assert!(p.contains("C0001"));
+        assert!(p.contains("A00001"));
+    }
+}

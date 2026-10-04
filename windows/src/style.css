@@ -1336,6 +1336,48 @@ input[type="range"]::-webkit-slider-thumb {
   border-color: var(--accent);
 }
 
+/* SAP Harness status banner: a tinted strip that carries the state colour. */
+.sap-status {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 7px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--sap-c) 11%, transparent);
+  border: 1px solid color-mix(in srgb, var(--sap-c) 26%, transparent);
+  min-width: 0;
+}
+
+.sap-status-dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--sap-c);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--sap-c) 22%, transparent);
+}
+
+.sap-status-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.sap-status-text b {
+  font: 600 11px var(--font);
+  color: var(--ink);
+}
+
+.sap-status-text span {
+  font: 400 10.5px var(--font);
+  color: var(--dim-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .int-row.first .int-name {
   color: #c5c8cd;
 }
@@ -1555,4 +1597,121 @@ input[type="range"]::-webkit-slider-thumb {
 
 .int-card.detail {
   padding-top: 8px;
+}
+
+/* Document create confirm dialog. Native <dialog>, styled to the app. */
+.confirm {
+  border: 1px solid var(--hairline);
+  border-radius: 14px;
+  background: var(--card);
+  color: var(--ink);
+  padding: 16px;
+  width: min(360px, 90vw);
+  font-family: var(--font);
+}
+.confirm::backdrop {
+  background: rgba(0, 0, 0, 0.55);
+}
+.confirm-title {
+  font: 600 13px var(--font);
+  color: var(--ink);
+  margin-bottom: 8px;
+}
+.confirm-body {
+  font: 400 11.5px/1.6 var(--font);
+  color: var(--dim);
+  white-space: pre-wrap;
+  margin-bottom: 14px;
+  max-height: 200px;
+  overflow: auto;
+  user-select: text;
+}
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.confirm-cancel,
+.confirm-ok {
+  font: 500 11.5px var(--font);
+  padding: 6px 14px;
+  border-radius: 7px;
+  border: 1px solid var(--hairline);
+  background: var(--tab-on);
+  color: var(--ink);
+  cursor: pointer;
+}
+.confirm-ok {
+  background: var(--green);
+  border-color: var(--green);
+  color: #06120a;
+}
+.confirm-cancel:hover { background: #26282d; }
+.confirm-ok:hover { filter: brightness(1.05); }
+
+/* Clickable pickers in the chat: pick an item or customer by tap. */
+.picks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.pick {
+  font: 500 11px var(--font);
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--hairline);
+  background: var(--tab-on);
+  color: var(--ink);
+  cursor: pointer;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pick:hover {
+  background: #26282d;
+  border-color: var(--dim-5);
+}
+
+.confirm-cols,
+.confirm-line {
+  display: grid;
+  grid-template-columns: 1fr 64px 84px;
+  gap: 6px;
+  align-items: center;
+}
+.confirm-cols {
+  font: 500 10px var(--font);
+  color: var(--dim-4);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 4px;
+}
+.confirm-cols span:nth-child(2),
+.confirm-cols span:nth-child(3) { text-align: right; }
+.confirm-lines { display: flex; flex-direction: column; gap: 5px; }
+.confirm-item {
+  font: 500 11.5px var(--font);
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.confirm-input {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg-2);
+  color: var(--text);
+  font: 400 11px var(--font);
+  padding: 4px 6px;
+  outline: none;
+  text-align: right;
+}
+.confirm-input:focus { border-color: var(--accent); }
+.confirm-hint {
+  font: 400 10.5px var(--font);
+  color: var(--dim-3);
+  margin-top: 8px;
 }

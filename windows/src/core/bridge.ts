@@ -160,6 +160,11 @@ export const Bridge = {
   sapB1Ask: (question: string, history: ChatTurn[]) =>
     callOrThrow<SapB1Answer>("sap_b1_ask", { question, history }),
 
+  /** Posts a document the user already confirmed. `spec` is the `payload` the
+   *  planner returned with the preview, with any edits the user made. */
+  sapB1CreateDocument: (spec: SapB1DocumentSpec) =>
+    callOrThrow<unknown>("sap_b1_create_document", { spec }),
+
   /** Tray → Pause. Stops the integration pollers, not just the island. */
   setPaused: (paused: boolean) => call<void>("set_paused", { paused }),
 };
@@ -187,6 +192,28 @@ export interface SapB1AnswerRow {
   value: number;
 }
 
+/** A clickable choice in the chat (an item or customer the user can pick). */
+export interface SapB1PickOption {
+  value: string;
+  label: string;
+}
+
+/** One line of a document the assistant proposes to create. */
+export interface SapB1LineSpec {
+  itemCode: string;
+  quantity: number;
+  price: number | null;
+}
+
+/** The document spec the planner returns with a create/copy preview, and that
+ *  the app posts (after any edits in the confirm dialog). */
+export interface SapB1DocumentSpec {
+  set: string;
+  cardCode: string;
+  docDate: string | null;
+  lines: SapB1LineSpec[];
+}
+
 /** One prior turn of a conversation, sent to the ERP planner. */
 export interface ChatTurn {
   role: "user" | "assistant";
@@ -206,10 +233,14 @@ export interface SapB1Answer {
   source: string;
   /** Tappable follow-ups. Empty when the question was understood. */
   suggestions: string[];
-  /** "result" | "clarify" | "answer" | "help" — how the front end renders it. */
+  /** "result" | "clarify" | "answer" | "confirm" — how the front end renders it. */
   kind: string;
   /** The "what I'll do" bubble, shown before a result. */
   plan: string | null;
+  /** For kind "confirm": the document spec to post after the user confirms. */
+  payload: SapB1DocumentSpec | null;
+  /** Clickable choices (items/customers) the user can pick in the chat. */
+  options: SapB1PickOption[];
   /** The question the assistant needs answered before it can run. */
   clarifyingQuestion: string | null;
 }

@@ -625,6 +625,13 @@ async fn sap_b1_ask(
     sapb1::ask::ask(&sapb1::credentials_from_secrets()?, &settings, &question, &history).await
 }
 
+/// Creates a sales or purchase document after the user confirmed the preview.
+/// The spec is the `payload` the planner returned; nothing is posted without it.
+#[tauri::command]
+async fn sap_b1_create_document(spec: serde_json::Value) -> Result<serde_json::Value, String> {
+    sapb1::create_document(&sapb1::credentials_from_secrets()?, &spec).await
+}
+
 /// Lets the island write to the same log as the Rust side.
 #[tauri::command]
 fn log_line(message: String) {
@@ -769,6 +776,7 @@ pub fn run() {
             open_n8n,
             sap_b1_probe,
             sap_b1_ask,
+            sap_b1_create_document,
             open_settings_window,
             set_paused,
         ])

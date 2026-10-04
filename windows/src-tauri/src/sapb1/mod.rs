@@ -26,6 +26,7 @@ pub mod ask;
 pub mod catalogue;
 pub mod dates;
 pub mod doctypes;
+pub mod documents;
 pub mod metadata;
 pub mod planner;
 pub mod query;
@@ -34,6 +35,7 @@ pub mod transport;
 pub use ask::{Answer, AnswerRow};
 
 use serde::Serialize;
+use serde_json::Value;
 
 use transport::Credentials;
 
@@ -93,6 +95,41 @@ pub fn credentials_from_secrets() -> Result<Credentials, String> {
         password: need("sapb1-password", "The Business One password")?,
         version: 1,
     })
+}
+
+/// Creates a sales or purchase document. Called by the app only after the user
+/// confirms the preview shown in the chat. `spec` is the shape the planner
+/// carried in the `payload` field: `{set, cardCode, docDate, lines[]}`.
+pub async fn create_document(c: &Credentials, spec: &Value) -> Result<Value, String> {
+    let set = spec
+        .get("set")
+        .and_then(Value::as_str)
+        .ok_or("No document set.")?;
+    let doc_type = documents::find_by_set(set)
+        .ok_or_else(|| format!("{set} is not a document type I can create."))?;
+    let card_code = spec.get("cardCode").and_then(Value::as_str).unwrap_or("").to_string();
+    let doc_date = spec.get("docDate").and_then(Value::as_str).map(|s| s.to_string());
+    let lines: Vec<documents::Line> = spec
+        .get("lines")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|l| {
+                    let item_code = l.get("itemCode").and_then(Value::as_str).unwrap_or("").to_string();
+                    if item_code.is_empty() {
+                        return None;
+                    }
+                    let quantity = l.get("quantity").and_then(Value::as_f64).unwrap_or(0.0);
+                    let price = l.get("price").and_then(Value::as_f64);
+                    Some(documents::Line { item_code, quantity, price })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let doc = documents::Document { doc_type, card_code, doc_date, lines };
+    documents::validate(&doc)?;
+    let payload = documents::build_payload(&doc);
+    transport::post(c, set, &payload).await
 }
 
 fn check(md: &metadata::Metadata) -> Probe {
@@ -196,6 +233,12 @@ mod tests {
             "how many invoices do we have",
             "how many employees",
             "sales by month last year",
+            "sales in 2015",
+            "net sales in 2015",
+            "sales from March to June 2015",
+            "show me employees",
+            "list some items",
+            "show me customer details",
         ];
         for q in questions {
             let answer = tauri::async_runtime::block_on(ask::ask(&c, &settings, q, &[]))
@@ -204,6 +247,30 @@ mod tests {
             assert!(
                 matches!(answer.kind.as_str(), "result" | "answer" | "clarify"),
                 "{q:?} returned an unknown kind {:?}",
+                answer.kind
+            );
+        }
+    }
+
+    /// Drives the write path through the real planner: a create and a copy both
+    /// build a preview and never post. The model is non-deterministic, so this
+    /// asserts the shape (a confirm preview or a clarification), not the codes.
+    #[test]
+    #[ignore = "needs a live Service Layer and a configured chat backend"]
+    fn live_write_path_previews() {
+        let c = credentials_from_secrets().expect("SAP credentials");
+        let settings = crate::settings::load();
+        let questions = [
+            "create a sales order for customer C0001 with 2 units of item A00001",
+            "copy sales order 1 to an invoice",
+        ];
+        for q in questions {
+            let answer = tauri::async_runtime::block_on(ask::ask(&c, &settings, q, &[]))
+                .unwrap_or_else(|e| panic!("{q:?} failed: {e}"));
+            println!("--- {q} ---\nkind={} title={}\n{}\npayload={:?}", answer.kind, answer.title, answer.text, answer.payload.is_some());
+            assert!(
+                matches!(answer.kind.as_str(), "confirm" | "clarify" | "result"),
+                "{q:?} returned an unexpected kind {:?}",
                 answer.kind
             );
         }

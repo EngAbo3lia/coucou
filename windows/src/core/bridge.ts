@@ -32,6 +32,40 @@ export interface BootInfo {
   cursorPoll: boolean;
 }
 
+/** One credential a service needs, in display order. */
+export interface CredentialField {
+  key: string;
+  label: string;
+  placeholder: string;
+  secret: boolean;
+}
+
+/**
+ * Every Credential Manager key Coucou uses, keyed by pill id. Single source of
+ * truth: the Settings form writes these keys, the island checks these keys and
+ * the ERP card names these keys. A key duplicated in two of those places was
+ * read under one name and written under another, so the pill asked for
+ * credentials the user had already saved.
+ */
+export const CREDENTIAL_FIELDS: Record<string, CredentialField[]> = {
+  integration_sapb1: [
+    { key: "sapb1-url", label: "Service Layer URL", placeholder: "https://host:50000", secret: false },
+    { key: "sapb1-company", label: "Company DB", placeholder: "COMPANY", secret: false },
+    { key: "sapb1-user", label: "User", placeholder: "manager", secret: false },
+    { key: "sapb1-password", label: "Password", placeholder: "…", secret: true },
+  ],
+  integration_n8n: [
+    { key: "n8n-url", label: "Instance URL", placeholder: "https://n8n.example.com", secret: false },
+    { key: "n8n-api-key", label: "API key", placeholder: "…", secret: true },
+  ],
+  integration_github: [{ key: "github-token", label: "Token", placeholder: "ghp_…", secret: true }],
+  integration_resend: [{ key: "resend-api-key", label: "API key", placeholder: "re_…", secret: true }],
+  integration_vercel: [{ key: "vercel-token", label: "Token", placeholder: "…", secret: true }],
+  integration_notion: [{ key: "notion-api-key", label: "Integration token", placeholder: "ntn_…", secret: true }],
+  integration_stripe: [{ key: "stripe-api-key", label: "Secret key", placeholder: "sk_live_…", secret: true }],
+  integration_calcom: [{ key: "calcom-api-key", label: "API key", placeholder: "cal_…", secret: true }],
+};
+
 export const Bridge = {
   boot: () => call<BootInfo>("boot"),
 
@@ -62,6 +96,11 @@ export const Bridge = {
 
   /** "Open terminal" → opens the folder in VS Code when `code` is on PATH. */
   openInVSCode: (path: string | null) => call<boolean>("open_in_vscode", { path }),
+
+  /** Full path of coucou.log, shown in Settings → Advanced. */
+  logPath: () => call<string>("log_path"),
+  /** Reveals the log's folder in the file manager. */
+  openLogFolder: () => call<void>("open_log_folder"),
 
   quit: () => call<void>("quit_app"),
 

@@ -2,26 +2,10 @@
 // pollers: a genuinely new item flips the pill to finished/error, badges it when
 // the pill isn't focused, plays a sound, and clears itself after 60 s.
 
-import { onEvent, Bridge, type IntegrationUpdate } from "../core/bridge";
+import { onEvent, Bridge, CREDENTIAL_FIELDS, type IntegrationUpdate } from "../core/bridge";
 import { Sound } from "../core/sound";
 import { State } from "../core/state";
 import type { Island } from "./island";
-
-/** Which Credential Manager key backs each pill. */
-const KEY_FOR: Record<string, string> = {
-  integration_stripe: "stripe-api-key",
-  integration_github: "github-token",
-  integration_vercel: "vercel-token",
-  integration_n8n: "n8n-api-key",
-  integration_resend: "resend-api-key",
-  integration_notion: "notion-api-key",
-  integration_calcom: "calcom-api-key",
-};
-
-/** Pills that only count as configured when every one of their keys exists. */
-const KEYS_FOR: Record<string, string[]> = {
-  integration_sapb1: ["sapb1-url", "sapb1-company", "sapb1-user", "sapb1-password"],
-};
 
 const clearTimers = new Map<string, number>();
 
@@ -32,11 +16,8 @@ export function registerIntegrationHandlers(island: Island) {
 
 /** Asks Rust which keys exist so the idle cards can say so. */
 export async function refreshConfigured() {
-  for (const [id, key] of Object.entries(KEY_FOR)) {
-    await markConfigured(id, [await Bridge.secretPresent(key)]);
-  }
-  for (const [id, keys] of Object.entries(KEYS_FOR)) {
-    const present = await Promise.all(keys.map((k) => Bridge.secretPresent(k)));
+  for (const [id, fields] of Object.entries(CREDENTIAL_FIELDS)) {
+    const present = await Promise.all(fields.map((f) => Bridge.secretPresent(f.key)));
     await markConfigured(id, present);
   }
   const hooks = State.settings.hooksInstalled;

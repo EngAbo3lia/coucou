@@ -103,11 +103,6 @@ export const OPENCODE_AGENT: AgentTask = {
   state: "idle", stepIndex: 0, steps: [], source: "agent", isIntegration: true,
 };
 
-export const TOGGLEABLE_INTEGRATION_IDS = [
-  "integration_resend", "integration_n8n", "integration_vercel", "integration_github",
-  "integration_notion", "integration_calcom", "integration_stripe",
-];
-
 /** What an integration poller last reported. */
 export interface IntegrationInfo {
   data: Record<string, unknown>;
@@ -362,11 +357,7 @@ class AppState {
   loadIntegrationTasks() {
     for (const proto of INTEGRATION_AGENTS) {
       const pillOn = this.pillOn(proto.id);
-      const integrationOn =
-        proto.id === "integration_claude" ||
-        proto.id === "integration_sapb1" ||
-        this.integrationOn(proto.id);
-      const shouldLoad = pillOn && integrationOn;
+      const shouldLoad = pillOn && this.integrationOn(proto.id);
       const idx = this.tasks.findIndex((t) => t.id === proto.id);
       if (shouldLoad && idx < 0) this.tasks.push({ ...proto, steps: [] });
       if (!shouldLoad && idx >= 0) this.tasks.splice(idx, 1);
@@ -446,22 +437,6 @@ class AppState {
     });
     if (!this.focusId) this.focusId = id;
     this.notify();
-  }
-
-  toggleIntegration(id: string) {
-    if (id === "integration_claude") return;
-    const active = this.settings.activeIntegrations;
-    const wasActive = active.includes(id);
-    if (wasActive) {
-      this.settings.activeIntegrations = active.filter((x) => x !== id);
-      if (this.focusId === id) this.focusId = "integration_claude";
-    } else {
-      if (active.length >= 4) return;
-      this.settings.activeIntegrations = [...active, id];
-    }
-    this.settings.features = { ...this.settings.features, [`integration.${id}`]: !wasActive };
-    this.loadIntegrationTasks();
-    void Bridge.saveSettings(this.settings);
   }
 
   defaultView(): IslandViewName {

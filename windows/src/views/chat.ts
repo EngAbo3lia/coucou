@@ -10,6 +10,12 @@ import type { ViewHost } from "./views";
 
 let nextId = 1;
 
+/** TEMP (test builds only): flatten a message onto one log line so the whole
+ *  conversation can be read back from coucou.log. Remove before release. */
+function logText(text: string): string {
+  return text.replace(/\s+/g, " ").trim().slice(0, 2000);
+}
+
 function bubble(message: ChatMessage, onPick?: (value: string) => void): HTMLElement {
   if (message.role === "user") {
     return h(
@@ -267,12 +273,17 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
     const file = State.droppedFile;
     const context: ChatContext | null =
       State.chatHistory.length === 1 && file ? { kind: "file", name: file.name, path: file.path } : null;
+    const target = State.chatTarget;
+    // TEMP (test builds): destination, timing and the full question and answer.
+    // Remove before release — an ERP reply can carry customer data.
+    const dest = target?.kind ?? (file ? "file" : "provider");
+    const started = Date.now();
+    void Bridge.log(`chat > ${dest} ${logText(query)}`);
 
     try {
       // A target means the message goes somewhere other than Coucou's own chat
       // provider — into an opencode session, or into the ERP. Same input box,
       // three destinations.
-      const target = State.chatTarget;
       if (target?.kind === "opencode") {
         const binding = State.bindingFor("integration_opencode");
         const model = binding.provider === "opencode" && binding.model ? `${binding.provider}/${binding.model}` : "";
@@ -318,11 +329,14 @@ export function buildPrompt(onHeightChange: () => void): ViewHost {
       }
       State.stateOverride = null;
       Sound.play("finish");
+      const answer = [...State.chatHistory].reverse().find((m) => m.role === "assistant");
+      void Bridge.log(`chat < ${dest} ${Date.now() - started}ms ${logText(answer?.content ?? "")}`);
     } catch (err) {
       State.stateOverride = null;
       State.noteMessage = String(err).replace(/^Error:\s*/, "");
       State.view = "note";
       Sound.play("error");
+      void Bridge.log(`chat ! ${dest} ${logText(State.noteMessage)}`);
     } finally {
       sending = false;
       State.notify();

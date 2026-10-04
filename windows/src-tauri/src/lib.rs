@@ -176,6 +176,21 @@ fn open_url(url: String) {
     platform::open_url(&url);
 }
 
+/// Full path of the append-only log, so the Settings window can show it.
+#[tauri::command]
+fn log_path() -> String {
+    crate::settings::local_dir()
+        .join("coucou.log")
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Reveals the log's folder in the file manager. No shell involved.
+#[tauri::command]
+fn open_log_folder() {
+    platform::reveal_folder(&crate::settings::local_dir().to_string_lossy());
+}
+
 /// "Open terminal" opens the working folder in VS Code when `code` is on PATH,
 /// and falls back to the file manager otherwise.
 #[tauri::command]
@@ -739,6 +754,8 @@ pub fn run() {
             reposition,
             open_url,
             open_in_vscode,
+            log_path,
+            open_log_folder,
             quit_app,
             hooks_status,
             hooks_preview,

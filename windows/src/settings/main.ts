@@ -3,7 +3,8 @@
 
 import "./settings.css";
 import {
-  Bridge, onEvent,
+  Bridge, onEvent, CREDENTIAL_FIELDS,
+  type CredentialField,
   type HookStatus,
   type ModelEntry,
   type OpenCodeStatus,
@@ -136,7 +137,7 @@ function agentsPage(): HTMLElement {
   const host = h("div", { style: "display:flex;flex-direction:column;gap:12px" });
   body.append(host);
 
-const agents: { id: string; name: string; pill: boolean }[] = [
+  const agents: { id: string; name: string; pill: boolean }[] = [
     { id: "integration_sapb1", name: "SAP Harness", pill: true },
     { id: "agent_opencode", name: "Opencode", pill: true },
     { id: "integration_claude", name: "Claude Code (display only)", pill: true },
@@ -489,14 +490,14 @@ async function loadProviderPresets() {
 
 // ── Integrations ──────────────────────────────────────────────────────────────
 
-const OTHER_INTEGRATIONS: { id: string; name: string; color: string; fields: { key: string; label: string; placeholder: string; secret: boolean }[] }[] = [
-  { id: "integration_stripe", name: "Stripe", color: "#0570DE", fields: [{ key: "stripe-api-key", label: "Secret key", placeholder: "sk_live_…", secret: true }] },
-  { id: "integration_github", name: "GitHub", color: "#F4505E", fields: [{ key: "github-token", label: "Token", placeholder: "ghp_…", secret: true }] },
-  { id: "integration_vercel", name: "Vercel", color: "#7C5CFF", fields: [{ key: "vercel-token", label: "Token", placeholder: "…", secret: true }] },
-  { id: "integration_n8n", name: "n8n", color: "#F29B38", fields: [{ key: "n8n-url", label: "Instance URL", placeholder: "https://n8n.example.com", secret: false }, { key: "n8n-api-key", label: "API key", placeholder: "…", secret: true }] },
-  { id: "integration_resend", name: "Resend", color: "#22C55E", fields: [{ key: "resend-api-key", label: "API key", placeholder: "re_…", secret: true }] },
-  { id: "integration_notion", name: "Notion", color: "#8C8C8C", fields: [{ key: "notion-api-key", label: "Integration token", placeholder: "ntn_…", secret: true }] },
-  { id: "integration_calcom", name: "Cal.com", color: "#C9956A", fields: [{ key: "calcom-api-key", label: "API key", placeholder: "cal_…", secret: true }] },
+const OTHER_INTEGRATIONS: { id: string; name: string; color: string; fields: CredentialField[] }[] = [
+  { id: "integration_stripe", name: "Stripe", color: "#0570DE", fields: CREDENTIAL_FIELDS["integration_stripe"] },
+  { id: "integration_github", name: "GitHub", color: "#F4505E", fields: CREDENTIAL_FIELDS["integration_github"] },
+  { id: "integration_vercel", name: "Vercel", color: "#7C5CFF", fields: CREDENTIAL_FIELDS["integration_vercel"] },
+  { id: "integration_n8n", name: "n8n", color: "#F29B38", fields: CREDENTIAL_FIELDS["integration_n8n"] },
+  { id: "integration_resend", name: "Resend", color: "#22C55E", fields: CREDENTIAL_FIELDS["integration_resend"] },
+  { id: "integration_notion", name: "Notion", color: "#8C8C8C", fields: CREDENTIAL_FIELDS["integration_notion"] },
+  { id: "integration_calcom", name: "Cal.com", color: "#C9956A", fields: CREDENTIAL_FIELDS["integration_calcom"] },
 ];
 
 function integrationsPage(): HTMLElement {
@@ -509,6 +510,14 @@ function integrationsPage(): HTMLElement {
 // Claude Code hooks. Neutral when simply not set up — the user may be on SAP,
   // not VS Code — and red only when installed but broken.
   const hookState: DotState = hookStatus.installed ? (hookStatus.hookReady ? "ok" : "error") : "off";
+  const claudeEnabled = settings.features["integration.integration_claude"] ?? true;
+  const claudeActive = h("button", { class: claudeEnabled ? "switch on" : "switch", title: "Turn this integration on or off" });
+  claudeActive.addEventListener("click", () => {
+    const on = claudeActive.classList.contains("on");
+    settings.features = { ...settings.features, ["integration.integration_claude"]: !on };
+    claudeActive.classList.toggle("on", !on);
+    void save();
+  });
   host.append(
     h("section", { class: "group" },
       h("h3", { style: "display:flex;align-items:center;gap:8px" },
@@ -518,6 +527,7 @@ function integrationsPage(): HTMLElement {
           ? "Hooked into your Claude Code sessions. Tool calls, questions and permission requests show in the island."
           : "Hooks are installed but the relay is missing. Reinstall to fix it.")
         : "Not set up. Claude Code hooks are only needed if you use Claude Code or VS Code; SAP Harness works without them."),
+      row("Active", claudeActive),
       row("settings.json", h("span", { class: "path", text: hookStatus.settingsPath })),
       row("Relay", h("span", { class: "path", text: hookStatus.hookPath }), statusDot(hookState)),
       hookActions(),
@@ -595,15 +605,19 @@ function opencodeRows(): HTMLElement {
 }
 
 function sapSection(): HTMLElement {
-  const fields = [
-    { key: "sapb1-url", label: "Service Layer URL", placeholder: "https://host:50000", secret: false },
-    { key: "sapb1-company", label: "Company DB", placeholder: "COMPANY", secret: false },
-    { key: "sapb1-user", label: "User", placeholder: "manager", secret: false },
-    { key: "sapb1-password", label: "Password", placeholder: "••••••••", secret: true },
-  ];
+  const fields = CREDENTIAL_FIELDS["integration_sapb1"];
   const present: Record<string, boolean> = {};
   for (const f of fields) present[f.key] = false;
   const rows = h("div", { style: "display:flex;flex-direction:column;gap:6px;flex:1 1 auto;min-width:0" });
+
+  const enabled = settings.features["integration.integration_sapb1"] ?? true;
+  const sw = h("button", { class: enabled ? "switch on" : "switch", title: "Turn this integration on or off" });
+  sw.addEventListener("click", () => {
+    const next = !sw.classList.contains("on");
+    sw.classList.toggle("on", next);
+    settings.features = { ...settings.features, ["integration.integration_sapb1"]: next };
+    void save();
+  });
 
   async function loadPresence() {
     for (const f of fields) present[f.key] = (await Bridge.secretPresent(f.key)) ?? false;
@@ -638,13 +652,14 @@ function sapSection(): HTMLElement {
     try {
       const probe = await Bridge.sapB1Probe();
       const ok = probe.ready;
-      dialog(hint(ok ? `Connected — ${probe.entitySetCount} entity sets, ${probe.typeCount} types.` : `Not ready — missing fields in ${probe.sets.filter((s) => s.missingFields.length).length} sets.`, ok ? undefined : "#f5a524"));
+      dialog(hint(ok ? "Connected — live data ready." : `Not ready — missing fields in ${probe.sets.filter((s) => s.missingFields.length).length} sets.`, ok ? undefined : "#f5a524"));
     } catch (err) {
       dialog(hint(`Could not connect: ${String(err)}`, "#f4505e"));
     }
   } });
   return group("SAP Harness",
     hint("The SAP pill is status-only. Connection details live here, in the Credential Manager."),
+    row("Active", sw),
     rows,
     h("div", { class: "row" }, h("span", { style: "flex:1" }), test),
   );
@@ -659,7 +674,7 @@ function dialog(content: HTMLElement) {
 }
 
 function loadPresence(def: typeof OTHER_INTEGRATIONS[number], present: Record<string, boolean>, host: HTMLElement) {
-void (async () => {
+  void (async () => {
     for (const f of def.fields) present[f.key] = (await Bridge.secretPresent(f.key)) ?? false;
     const enabled = settings.features[`integration.${def.id}`] ?? settings.activeIntegrations.includes(def.id);
     const sw = h("button", { class: enabled ? "switch on" : "switch", title: "Turn this integration on or off" });
@@ -690,7 +705,7 @@ void (async () => {
       });
       rows.append(h("div", { class: "row" }, h("label", { style: "min-width:104px", text: f.label }), input, save, dotEl));
     }
-host.append(
+    host.append(
       group(def.name,
         row("Active", sw),
         rows,
@@ -712,7 +727,7 @@ function appearancePage(): HTMLElement {
   });
   body.append(group("Pills",
     row("Show pill row", pillSw),
-    hint("Off shrinks the island to a single centred pill.", "#f5a524"),
+    hint("Off shrinks the island to a single centred pill. Hidden pills keep polling — turn a service off on the Integrations page to stop it.", "#f5a524"),
   ));
 
   const featureDefs: { key: string; label: string }[] = [
@@ -739,7 +754,7 @@ function appearancePage(): HTMLElement {
   ];
   const pillList = h("div", { style: "display:flex;flex-direction:column;gap:8px" });
   for (const def of pillDefs) {
-    const on = settings.pillsVisible && settings.features[`pill.${def.id}`] !== false;
+    const on = settings.features[`pill.${def.id}`] !== false;
     const sw = toggle(on, (v) => {
       settings.features = { ...settings.features, [`pill.${def.id}`]: v };
       void save();
@@ -763,6 +778,16 @@ function advancedPage(): HTMLElement {
   body.append(group("Runtime",
     row("Pause integrations", pause),
     row("Version", h("span", { text: version || "—" })),
+  ));
+  const logRow = row("Log file", h("span", { class: "path", text: "—" }));
+  void (async () => {
+    const path = await Bridge.logPath();
+    if (path) (logRow.querySelector(".path") as HTMLElement).textContent = path;
+  })();
+  const openLog = h("button", { text: "Open log folder", onclick: () => void Bridge.openLogFolder() });
+  body.append(group("Diagnostics",
+    logRow,
+    h("div", { class: "row" }, h("span", { style: "flex:1" }), openLog),
   ));
   body.append(hint("No telemetry. Network requests only go to the services you configure yourself."));
   return body;
@@ -805,7 +830,7 @@ async function main() {
     settings = { ...DEFAULT_SETTINGS, ...boot.settings };
     version = boot.version;
   }
-hookStatus = (await Bridge.hooksStatus()) ?? hookStatus;
+  hookStatus = (await Bridge.hooksStatus()) ?? hookStatus;
   opencode = (await Bridge.openCodeStatus()) ?? opencode;
   await loadProviderPresets();
   await loadProviderConfigs();
@@ -830,6 +855,7 @@ hookStatus = (await Bridge.hooksStatus()) ?? hookStatus;
 
   void onEvent<Settings>("settings-changed", (s) => {
     settings = { ...DEFAULT_SETTINGS, ...s };
+    render();
   });
 
   void onEvent<string>("settings-open-page", (target) => {

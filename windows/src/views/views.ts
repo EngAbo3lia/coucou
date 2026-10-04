@@ -5,7 +5,7 @@
 import { h, svg, clear, dot } from "./dom";
 import { ICONS } from "./icons";
 import { Ticker } from "./ticker";
-import { State, type AgentTask, type ChatTarget } from "../core/state";
+import { State, INTEGRATION_AGENTS, OPENCODE_AGENT, type AgentTask, type ChatTarget } from "../core/state";
 import { washRGBA, type IslandViewName, type Wash } from "../core/layout";
 import { createMiniBot, pruneMiniBots } from "../mochi/minibots";
 import { buildPrompt } from "./chat";
@@ -489,6 +489,9 @@ function buildSettings(actions: ViewActions): ViewHost {
   );
   const claudeBadge = h("span", { class: "status-badge" });
   const apiBadge = h("span", { class: "status-badge" });
+  // A hidden pill leaves no other trace in the island, so say how many are
+  // hidden here; the full Settings window is where they are switched back on.
+  const pillBadge = h("span", { class: "status-badge" });
 
   const rows = h(
     "div",
@@ -506,6 +509,7 @@ function buildSettings(actions: ViewActions): ViewHost {
       { class: "settings-row", style: "gap:14px" },
       claudeBadge,
       apiBadge,
+      pillBadge,
       h("div", { class: "grow" }),
       h("button", {
         class: "link-btn",
@@ -535,6 +539,12 @@ function buildSettings(actions: ViewActions): ViewHost {
       );
       clear(apiBadge);
       apiBadge.append(dot("#F4505E", 6), h("span", { text: "API" }));
+      clear(pillBadge);
+      const hidden = [...INTEGRATION_AGENTS.map((t) => t.id), OPENCODE_AGENT.id]
+        .filter((id) => !State.feature(`pill.${id}`)).length;
+      if (hidden > 0) {
+        pillBadge.append(dot("#f5a524", 6), h("span", { text: `${hidden} hidden` }));
+      }
     },
   };
 }

@@ -7,7 +7,7 @@
 import { h, svg, clear, dot } from "./dom";
 import { ICONS } from "./icons";
 import { State, type AgentTask, type IntegrationInfo } from "../core/state";
-import { Bridge, type OpencodeSession, type SapB1Probe } from "../core/bridge";
+import { Bridge, CREDENTIAL_FIELDS, type OpencodeSession, type SapB1Probe } from "../core/bridge";
 
 /** Same shape as the Swift `timeAgo` computed properties. */
 export function timeAgo(value: unknown): string {
@@ -526,12 +526,7 @@ function n8nDetail(task: AgentTask, onBack: () => void): HTMLElement {
 // Settings row. Passwords go straight to the Credential Manager and are never
 // read back — only presence is ever known.
 
-const SAP_FIELDS: { key: string; label: string; placeholder: string; secret: boolean }[] = [
-  { key: "sapb1-url", label: "Service Layer URL", placeholder: "https://host:50000", secret: false },
-  { key: "sapb1-company", label: "Company DB", placeholder: "TESTING01", secret: false },
-  { key: "sapb1-user", label: "User", placeholder: "manager", secret: false },
-  { key: "sapb1-password", label: "Password", placeholder: "…", secret: true },
-];
+const SAP_FIELDS = CREDENTIAL_FIELDS.integration_sapb1;
 
 /** Which SAP keys exist, fetched once: values are never readable. */
 let sapKeys: Record<string, boolean> | null = null;

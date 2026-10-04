@@ -1,4 +1,4 @@
-//! The writable entities beyond the sales/purchase documents, described once so
+﻿//! The writable entities beyond the sales/purchase documents, described once so
 //! the planner, the confirm dialog and the write command all agree on what a
 //! given entity needs.
 //!
@@ -70,6 +70,16 @@ pub const ENTITIES: &[EntityDef] = &[
         ],
         needs_lines: true,
     },
+    EntityDef {
+        set: "ExchangeRates",
+        name: "exchange rate",
+        fields: &[
+            Field { key: "RateDate", label: "Date", kind: "date", required: true, default: "", options: &[] },
+            Field { key: "Currency", label: "Currency", kind: "text", required: true, default: "", options: &[] },
+            Field { key: "Rate", label: "Rate", kind: "decimal", required: true, default: "1", options: &[] },
+        ],
+        needs_lines: false,
+    },
 ];
 
 pub fn find(set: &str) -> Option<&'static EntityDef> {
@@ -102,6 +112,8 @@ pub fn build_payload(entity: &EntityDef, values: &Map<String, Value>, lines: &[L
             }
             let value = if field.kind == "number" {
                 json!(v.trim().parse::<i64>().map_err(|_| format!("{} must be a whole number.", field.label))?)
+            } else if field.kind == "decimal" {
+                json!(v.trim().parse::<f64>().map_err(|_| format!("{} must be a number.", field.label))?)
             } else {
                 json!(v.trim())
             };
@@ -125,12 +137,26 @@ pub fn build_payload(entity: &EntityDef, values: &Map<String, Value>, lines: &[L
                 .iter()
                 .filter(|l| !l.item_code.is_empty())
                 .map(|l| {
-                    json!({
+                    let mut line = json!({
                         "ItemCode": l.item_code,
                         "Quantity": l.quantity,
                         "WarehouseCode": warehouse,
                         "UnitPrice": l.price.unwrap_or(0.0),
-                    })
+                    });
+                    if let Some(batch) = l.batch.as_ref().filter(|b| !b.trim().is_empty()) {
+                        line["BatchNumbers"] = json!([{ "BatchNumber": batch.trim(), "Quantity": l.quantity }]);
+                    }
+                    let serials: Vec<Value> = l
+                        .serials
+                        .iter()
+                        .map(|s| s.trim())
+                        .filter(|s| !s.is_empty())
+                        .map(|s| json!({ "SerialNumber": s, "Quantity": 1.0 }))
+                        .collect();
+                    if !serials.is_empty() {
+                        line["SerialNumbers"] = json!(serials);
+                    }
+                    line
                 })
                 .collect();
             body.insert("DocumentLines".into(), json!(doc_lines));
@@ -196,7 +222,7 @@ mod tests {
 
     #[test]
     fn a_goods_receipt_carries_its_lines_and_warehouse() {
-        let lines = vec![Line { item_code: "ZZ1".into(), quantity: 250.0, price: Some(5.0), base_line: None }];
+        let lines = vec![Line { item_code: "ZZ1".into(), quantity: 250.0, price: Some(5.0), base_line: None, serials: Vec::new(), batch: None }];
         let body = build_payload(
             find("InventoryGenEntries").unwrap(),
             &values(&[("DocDate", "2026-08-01"), ("WarehouseCode", "02")]),
@@ -215,3 +241,4 @@ mod tests {
         assert!(err.contains("whole number"));
     }
 }
+

@@ -48,6 +48,10 @@ pub struct LineSpec {
     pub item_code: String,
     pub quantity: f64,
     pub price: Option<f64>,
+    /// Serial numbers for a serial-managed item, one per unit.
+    pub serial_numbers: Vec<String>,
+    /// A batch number for a batch-managed item.
+    pub batch_number: Option<String>,
 }
 
 /// A symbolic time window, resolved to real dates by the executor. The model is
@@ -101,12 +105,9 @@ pub enum PlanKind {
     Create,
     /// Copy a source document into its target (order -> invoice).
     Copy,
-    /// Receive stock (a goods receipt) for an item.
-    Receive,
-    /// Create an item.
-    NewItem,
-    /// Create a business partner.
-    NewPartner,
+    /// Create any entity the registry knows: an item, a partner, a goods
+    /// receipt, an exchange rate. `entitySet` selects which.
+    Write,
     /// Just reply with `summary` — a welcome, a general answer, a non-data reply.
     Answer,
     /// Ambiguous: needs the user to answer `clarifying_question`.
@@ -128,6 +129,12 @@ pub struct Plan {
     /// field (DocDate ge … and le …), so an arbitrary year or month is expressible.
     pub filter: Vec<FilterSpec>,
     pub time_window: Option<TimeWindow>,
+    /// An explicit inclusive ISO date range, used when `time_window` cannot say
+    /// what the user meant: a named quarter ("Q3", "3rd quarter 2026"), a named
+    /// month ("March 2026"), or any other fixed period. Takes precedence over
+    /// `time_window`. Both must be `YYYY-MM-DD`.
+    pub from: Option<String>,
+    pub to: Option<String>,
     /// For kind "create": the customer or supplier code.
     pub card_code: Option<String>,
     /// For kind "create": an ISO document date (optional, server defaults to today).
@@ -153,9 +160,7 @@ impl Plan {
             "detail" => PlanKind::Detail,
             "create" => PlanKind::Create,
             "copy" => PlanKind::Copy,
-            "receive" => PlanKind::Receive,
-            "new_item" => PlanKind::NewItem,
-            "new_partner" => PlanKind::NewPartner,
+            "write" => PlanKind::Write,
             "answer" => PlanKind::Answer,
             _ => PlanKind::Clarify,
         }
@@ -223,8 +228,8 @@ impl Plan {
             return Ok(());
         }
         // A master-data or inventory write: the set must be one the entity
-        // registry knows, and a goods receipt also needs its lines.
-        if matches!(self.parsed_kind(), PlanKind::Receive | PlanKind::NewItem | PlanKind::NewPartner) {
+        // registry knows, and a set that takes lines must have them.
+        if self.parsed_kind() == PlanKind::Write {
             let set = self.entity_set.as_deref().ok_or("No entity set.")?;
             let entity = entities::find(set)
                 .ok_or_else(|| format!("{set} is not an entity I can create."))?;
@@ -353,6 +358,8 @@ The JSON shape:\n\
   \"metrics\": [{\"field\": \"DocTotal\", \"op\": \"sum\", \"alias\": \"Total\"}],\n\
   \"filter\": [{\"field\": \"DocDate\", \"op\": \"ge\", \"value\": \"2015-01-01\"}, {\"field\": \"DocDate\", \"op\": \"le\", \"value\": \"2015-12-31\"}] | null,\n\
   \"timeWindow\": \"this_quarter\" | \"last_quarter\" | \"all\" | ... | null,\n\
+  \"from\": \"2026-07-01\" | null,\n\
+  \"to\": \"2026-09-30\" | null,\n\
   \"cardCode\": \"C0001\" | null,\n\
   \"docDate\": \"2026-10-04\" | null,\n\
   \"lines\": [{\"itemCode\": \"A00001\", \"quantity\": 2, \"price\": 100}] | null,\n\
@@ -380,24 +387,41 @@ Rules:\n\
 - \"copy\" = copy a source document into its twin (Orders -> Invoices,\n\
   PurchaseOrders -> PurchaseInvoices). entitySet names the source; filter DocNum\n\
   eq names the document to copy. The app shows a confirmation before posting.\n\
-- \"receive\" = receive stock (a goods receipt) for an item, so a later document can\n\
-  be posted against it. entitySet is \"InventoryGenEntries\"; lines name the item and\n\
-  quantity; values may set DocDate and WarehouseCode. Use it when the user says they\n\
-  have no stock, or to fix a \"negative inventory\" refusal.\n\
-- \"new_item\" = create an item. entitySet is \"Items\"; values must carry ItemCode and\n\
-  ItemName. Use it when the user names an item that does not exist yet.\n\
-- \"new_partner\" = create a customer or supplier. entitySet is \"BusinessPartners\";\n\
-  values carry CardCode, CardName, CardType (cCustomer or cSupplier), Country,\n\
-  Currency and BillToState. Use it when a document fails because the partner is missing.\n\
-- For \"receive\", \"new_item\" and \"new_partner\" the app opens a form prefilled from\n\
-  values, so put your best guess there and let the user correct it.\n\
+- \"write\" = create a master-data or inventory entity, never post it directly.\n\
+  entitySet is the set to write; values carries the header fields by their\n\
+  Service Layer name; lines carries items for a set that takes them. The app opens\n\
+  a form prefilled from values, so put your best guess there. Valid sets:\n\
+  * Items - values ItemCode, ItemName (ItemsGroupCode optional).\n\
+  * BusinessPartners - values CardCode, CardName, CardType (cCustomer or\n\
+    cSupplier), Country, Currency, BillToState.\n\
+  * InventoryGenEntries - a goods receipt to add stock. values DocDate,\n\
+    WarehouseCode; lines name the item and quantity. Use it when the user has no\n\
+    stock, or to fix a \"negative inventory\" refusal.\n\
+  * ExchangeRates - values RateDate, Currency, Rate. Use it when a document is\n\
+    refused for a missing exchange rate.\n\
+- For a serial- or batch-managed item, a line may carry serialNumbers (a list, one\n\
+  per unit) or batchNumber. Ask for them when the user knows them; the form shows\n\
+  the fields.\n\
+- If the user asks to add, create, place, raise, post or make a document (an order, an\n\
+  invoice, a purchase, a credit note), that request is kind create. Never answer it with\n\
+  detail. Looking a customer up is a step inside create, not the reply: match the name the\n\
+  user gave against CardName, put the code you found in cardCode, and carry on. Only stop\n\
+  and ask when the name matches more than one partner, and name the matches in\n\
+  clarifyingQuestion.\n\
 - If the question needs a time window or a choice and none is given, set kind to \"clarify\" and\n\
   put the question in clarifyingQuestion. Never guess a period.\n\
-- Use timeWindow for the named periods (this_quarter, last_year, last_30_days…).\n\
-  For a range the user names explicitly (\"in 2015\", \"from March to June\", \"this fiscal\n\
-  year\"), use a filter on DocDate with ge/le — one condition per bound. filter and\n\
-  timeWindow may combine; both are ANDed.\n\
-- \"count\" uses the metrics array with op \"count\" and ignores the field; entitySet can be a\n\
+- A named quarter (\"Q3\", \"3rd quarter\", \"third quarter of 2026\") is NOT a timeWindow.\n\
+  Compute the dates yourself and set \"from\" and \"to\" (the quarter's own first and last\n\
+  day). A named month or year works the same way. \"q3?\" on its own is ambiguous about the\n\
+  year, so use from/to when the year is clear from the conversation and ask when it is not.\n\
+- Use timeWindow only for periods relative to today (this_quarter, last_year,\n\
+  last_30_days…). \"from\"/\"to\" win over timeWindow when both are set.\n\
+- A question that asks for one number (\"sales\", \"revenue\", \"how much\", \"total\", \"net\")\n\
+  is kind \"aggregate\" with an empty groupBy and a single sum metric. Never groupBy for\n\
+  it. Only add groupBy when the user actually asks to break the figure down (\"by month\",\n\
+  \"per customer\", \"top 5\", \"each item\"). Grouping by DocDate for a plain sales total\n\
+  returns one line per document, which is not what was asked.\n\
+- The count kind uses the metrics array with op count and ignores the field; entitySet can be a\n\
   count-only set such as EmployeesInfo.\n\
 - groupBy may be empty for a plain total, or one or more of the listed fields.\n\
 - Keep the summary human: \"Sales for the last quarter, by month\" not \"groupby DocDate sum DocTotal\".\n";
@@ -604,7 +628,13 @@ fn as_lines(v: &Value) -> Vec<LineSpec> {
             let item_code = m.get("itemCode").and_then(as_string).unwrap_or_default();
             let quantity = m.get("quantity").and_then(Value::as_f64).unwrap_or(0.0);
             let price = m.get("price").and_then(Value::as_f64);
-            Some(LineSpec { item_code, quantity, price })
+            // The model may hand serial numbers as a list or a comma string.
+            let serial_numbers = m
+                .get("serialNumbers")
+                .map(as_string_list)
+                .unwrap_or_default();
+            let batch_number = m.get("batchNumber").and_then(as_string);
+            Some(LineSpec { item_code, quantity, price, serial_numbers, batch_number })
         })
         .collect()
 }
@@ -637,6 +667,8 @@ fn plan_from_value(v: &Value) -> Plan {
             .map(as_filters)
             .unwrap_or_default(),
         time_window: v.get("timeWindow").and_then(as_time_window),
+        from: v.get("from").and_then(Value::as_str).map(str::to_string),
+        to: v.get("to").and_then(Value::as_str).map(str::to_string),
         card_code: v.get("cardCode").and_then(as_string),
         doc_date: v.get("docDate").and_then(as_string),
         lines: v.get("lines").map(as_lines).unwrap_or_default(),
@@ -662,7 +694,9 @@ mod tests {
                 alias: "Total".into(),
             }],
             filter: vec![],
-            time_window: Some(TimeWindow::LastQuarter),
+time_window: Some(TimeWindow::LastQuarter),
+            from: None,
+            to: None,
             card_code: None,
             doc_date: None,
             lines: vec![],
@@ -758,7 +792,7 @@ mod tests {
             kind: "create".into(),
             entity_set: Some("Orders".into()),
             card_code: Some("C0001".into()),
-            lines: vec![LineSpec { item_code: "A00001".into(), quantity: 2.0, price: Some(100.0) }],
+            lines: vec![LineSpec { item_code: "A00001".into(), quantity: 2.0, price: Some(100.0), ..Default::default() }],
             ..Default::default()
         };
         assert!(good.validated().is_ok(), "{:?}", good.validated());
@@ -796,7 +830,9 @@ mod tests {
             group_by: vec![],
             metrics: vec![],
             filter: vec![],
-            time_window: None,
+time_window: None,
+            from: None,
+            to: None,
             card_code: None,
             doc_date: None,
             lines: vec![],

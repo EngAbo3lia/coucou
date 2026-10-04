@@ -117,7 +117,13 @@ function confirmDocument(a: SapB1Answer): Promise<ConfirmResult | null> {
     const d = h("dialog", { class: "confirm" });
     d.append(h("div", { class: "confirm-title", text: a.title }));
 
-    const editors: { qty: HTMLInputElement; price: HTMLInputElement }[] = [];
+    interface LineEditor {
+      qty: HTMLInputElement;
+      price: HTMLInputElement;
+      serial?: HTMLInputElement;
+      batch?: HTMLInputElement;
+    }
+    const editors: LineEditor[] = [];
     const lineEditors = (lines: SapB1LineSpec[]) => {
       const list = h("div", { class: "confirm-lines" });
       for (const line of lines) {
@@ -135,9 +141,47 @@ function confirmDocument(a: SapB1Answer): Promise<ConfirmResult | null> {
             qty, price,
           ),
         );
-        editors.push({ qty, price });
+        const editor: LineEditor = { qty, price };
+        // A batch/serial item rejects the line without its numbers, so the form
+        // asks for them right here.
+        if (line.manageSerial) {
+          editor.serial = h("input", {
+            class: "confirm-input confirm-subline", type: "text",
+            placeholder: "Serial numbers, comma separated",
+            value: (line.serialNumbers ?? []).join(", "),
+          }) as HTMLInputElement;
+          list.append(editor.serial);
+        }
+        if (line.manageBatch) {
+          editor.batch = h("input", {
+            class: "confirm-input confirm-subline", type: "text",
+            placeholder: "Batch number",
+            value: line.batchNumber ?? "",
+          }) as HTMLInputElement;
+          list.append(editor.batch);
+        }
+        editors.push(editor);
       }
       return list;
+    };
+
+    /** Reads a line back, including any serial/batch the user typed. */
+    const readLine = (line: SapB1LineSpec, i: number): SapB1LineSpec => {
+      const e = editors[i];
+      const serialNumbers = e.serial
+        ? e.serial.value.split(",").map((s) => s.trim()).filter(Boolean)
+        : line.serialNumbers ?? [];
+      const batchNumber = e.batch
+        ? (e.batch.value.trim() || null)
+        : line.batchNumber ?? null;
+      return {
+        itemCode: line.itemCode,
+        quantity: Number(e.qty.value) || 0,
+        price: e.price.value.trim() === "" ? null : Number(e.price.value),
+        baseLine: line.baseLine ?? null,
+        serialNumbers,
+        batchNumber,
+      };
     };
 
     if (payload && "fields" in payload) {
@@ -181,11 +225,7 @@ function confirmDocument(a: SapB1Answer): Promise<ConfirmResult | null> {
           d.close();
           const values: Record<string, string> = {};
           for (const [key, input] of inputs) { values[key] = input.value; }
-          const lines = spec.lines.map((line, i) => ({
-            itemCode: line.itemCode,
-            quantity: Number(editors[i].qty.value) || 0,
-            price: editors[i].price.value.trim() === "" ? null : Number(editors[i].price.value),
-          }));
+          const lines = spec.lines.map(readLine);
           resolve({ kind: "entity", set: spec.set, values, lines });
         },
       });
@@ -211,13 +251,7 @@ function confirmDocument(a: SapB1Answer): Promise<ConfirmResult | null> {
         class: "confirm-ok", text: "Create",
         onclick: () => {
           d.close();
-          const lines = spec.lines.map((line, i) => ({
-            itemCode: line.itemCode,
-            quantity: Number(editors[i].qty.value) || 0,
-            price: editors[i].price.value.trim() === "" ? null : Number(editors[i].price.value),
-            // A copy keeps its source line even after the user edits the figures.
-            baseLine: line.baseLine ?? null,
-          }));
+          const lines = spec.lines.map(readLine);
           resolve({ kind: "document", spec: { ...spec, lines } });
         },
       });

@@ -155,7 +155,7 @@ mod tests {
             card_code: card.into(),
             doc_date: Some("2026-08-15".into()),
             due_date: Some("2026-09-14".into()),
-            lines: vec![Line { item_code: item.into(), quantity: 1.0, price: None, base_line: None }],
+            lines: vec![Line { item_code: item.into(), quantity: 1.0, price: None, base_line: None, serials: Vec::new(), batch: None }],
             base: None,
         }
     }
@@ -202,3 +202,4 @@ mod tests {
         assert_eq!(fix.message(), "-9999: something new");
     }
 }
+

@@ -1,15 +1,15 @@
-﻿//! Answers questions about the ERP from the island chat.
+//! Answers questions about the ERP from the island chat.
 //!
 //! The model is the brain. A question plus the conversation so far goes to the
 //! configured chat backend, which returns a structured `Plan`. The plan is
 //! validated against the report allowlists and executed. Nothing here does
 //! keyword routing: the model decides what to ask, what to run, and how to
-//! answer. The only hard guard is the validator â€” a plan can never read a field
+//! answer. The only hard guard is the validator — a plan can never read a field
 //! outside the allowlist, and filter values are sanitised before they reach the
 //! query string.
 //!
-//! The queries respect the rules in `query` â€” no `$filter` with `$apply`, no date
-//! functions in `groupby` â€” so the executor fetches raw rows and slices, buckets
+//! The queries respect the rules in `query` — no `$filter` with `$apply`, no date
+//! functions in `groupby` — so the executor fetches raw rows and slices, buckets
 //! and sums in Rust rather than asking the server to do something it rejects.
 
 use std::collections::HashMap;
@@ -100,9 +100,9 @@ pub async fn ask(
     let plan = planner::plan(settings, question, history).await.map_err(|e| {
         // Never surface a raw serde/internal string to the user.
         if e.contains("No chat backend") {
-            "No AI backend is set up for the SAP Harness. Configure one in Settings â†’ Agents, then ask again.".to_string()
+            "No AI backend is set up for the SAP Harness. Configure one in Settings → Agents, then ask again.".to_string()
         } else if e.contains("Bad plan") || e.contains("no JSON") {
-            "Sorry, I didn't quite catch that. Could you say it another way â€” for example, \"show me sales this year\" or \"list the items\"?".to_string()
+            "Sorry, I didn't quite catch that. Could you say it another way — for example, \"show me sales this year\" or \"list the items\"?".to_string()
         } else {
             e
         }
@@ -147,12 +147,58 @@ fn answer_reply(plan: &Plan) -> Answer {
     }
 }
 
-// â”€â”€ executor â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// —— executor ——————————————————————————————————————————————————————————————————
+
+/// The inclusive date range the plan runs over. An explicit `from`/`to` wins,
+/// because a named quarter ("Q3") or month has no `TimeWindow`; the symbolic
+/// window is the fallback.
+fn resolve_range(plan: &Plan) -> Option<(String, String)> {
+    explicit_range(plan).or_else(|| plan.time_window.and_then(dates::range))
+}
+
+/// The range the user named outright, when both bounds are real dates in order.
+fn explicit_range(plan: &Plan) -> Option<(String, String)> {
+    let iso = |s: &Option<String>| {
+        s.as_deref()
+            .map(str::trim)
+            .filter(|v| is_iso_date(v))
+            .map(str::to_string)
+    };
+    match (iso(&plan.from), iso(&plan.to)) {
+        (Some(start), Some(end)) if start <= end => Some((start, end)),
+        _ => None,
+    }
+}
+
+fn is_iso_date(v: &str) -> bool {
+    let b = v.as_bytes();
+    if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
+        return false;
+    }
+    let mut digits = b[..4].iter().chain(b[5..7].iter()).chain(b[8..].iter());
+    if !digits.all(u8::is_ascii_digit) {
+        return false;
+    }
+    let num = |r: &[u8]| r.iter().fold(0i32, |a, d| a * 10 + (d - b'0') as i32);
+    let (y, m, d) = (num(&b[..4]), num(&b[5..7]), num(&b[8..]));
+    // A bound that is not a real day would reach the server as a bad filter and
+    // come back as an opaque error, so it is rejected here instead.
+    (1..=12).contains(&m) && d >= 1 && d <= days_in_month(y, m)
+}
+
+fn days_in_month(y: i32, m: i32) -> i32 {
+    const LEN: [i32; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    if m == 2 && leap {
+        return 29;
+    }
+    LEN[(m - 1) as usize]
+}
 
 /// Runs a validated plan against the ERP.
 async fn execute(c: &Credentials, plan: &Plan) -> Result<Answer, String> {
     plan.validated()?;
-    let range = plan.time_window.and_then(dates::range);
+    let range = resolve_range(plan);
     match plan.parsed_kind() {
         PlanKind::Count => count_plan(c, plan, range).await,
         PlanKind::List => list_plan(c, plan, range).await,
@@ -166,7 +212,7 @@ async fn execute(c: &Credentials, plan: &Plan) -> Result<Answer, String> {
         PlanKind::Detail => detail_plan(c, plan, range).await,
         PlanKind::Create => create_plan(c, plan).await,
         PlanKind::Copy => copy_plan(c, plan).await,
-        PlanKind::Receive | PlanKind::NewItem | PlanKind::NewPartner => Ok(entity_plan(plan)?),
+        PlanKind::Write => Ok(entity_plan(plan)?),
         PlanKind::Answer => Ok(answer_reply(plan)),
         PlanKind::Clarify => Err("The plan still needs a clarifying answer.".into()),
     }
@@ -197,15 +243,37 @@ async fn fetch_rows(
             fields.push(f.field.clone());
         }
     }
-    let url = query::build_list_url(set, &fields, query::ROW_CAP);
-    let rows = transport::get(c, &url).await?;
-    let list = rows.get("value").and_then(Value::as_array).cloned().unwrap_or_default();
+    // The server caps every page (20 rows on the verified install) no matter how
+    // large a `$top` is asked for, so a single read would silently miss most
+    // rows and report a total of zero. Page with `$skip` until the rows run out
+    // or the cap is reached.
+    let mut list: Vec<Value> = Vec::new();
+    let mut skip = 0usize;
+    // A server that ignored `$skip` would loop forever; ROW_CAP pages is more
+    // than enough for the cap, so that is the hard stop.
+    for _ in 0..ROW_CAP {
+        let url = query::build_page_url(set, &fields, query::PAGE, skip);
+        let rows = transport::get(c, &url).await?;
+        let page = rows.get("value").and_then(Value::as_array).cloned().unwrap_or_default();
+        if page.is_empty() {
+            break;
+        }
+        skip += page.len();
+        list.extend(page);
+        if list.len() >= ROW_CAP {
+            break;
+        }
+    }
     let filtered: Vec<Value> = list
         .into_iter()
         .filter(|r| {
             if let Some((start, end)) = range {
                 let date = r.get("DocDate").and_then(Value::as_str).unwrap_or("");
-                if !(date.is_empty() || (date >= start.as_str() && date <= end.as_str())) {
+                // The server returns `2026-09-30T00:00:00Z`; compared whole, the
+                // `T` makes the last day of a window sort after its own end and
+                // the day silently drops. Only the date part matters here.
+                let day = date.get(..10).unwrap_or(date);
+                if !(day.is_empty() || (day >= start.as_str() && day <= end.as_str())) {
                     return false;
                 }
             }
@@ -232,7 +300,18 @@ fn row_matches(row: &Value, f: &FilterSpec) -> bool {
             _ => false,
         };
     }
-    let c = cell.as_str().unwrap_or("");
+    // A date cell carries a time (`2026-09-30T00:00:00Z`); comparing it against a
+    // bare `2026-09-30` bound would drop the boundary day. Trim both to the day.
+    let as_day = |s: &str| {
+        if s.len() >= 10 && s.as_bytes().get(4) == Some(&b'-') {
+            s[..10].to_string()
+        } else {
+            s.to_string()
+        }
+    };
+    let c = as_day(cell.as_str().unwrap_or(""));
+    let value = as_day(value);
+    let (c, value) = (c.as_str(), value.as_str());
     match f.op.as_str() {
         "eq" => c == value,
         "ge" => c >= value,
@@ -327,9 +406,9 @@ async fn grouped(
     for r in &rows {
         let key = dims
             .iter()
-            .map(|d| r.get(d).and_then(Value::as_str).unwrap_or("?").to_string())
+            .map(|d| r.get(d).and_then(Value::as_str).map(display_label).unwrap_or("?".to_string()))
             .collect::<Vec<_>>()
-            .join(" Â· ");
+            .join(" · ");
         let v = r.get(&metric.field).and_then(Value::as_f64).unwrap_or(0.0);
         *groups.entry(key).or_default() += v;
     }
@@ -423,7 +502,7 @@ async fn list_plan(
             let label = r
                 .get(&label_field)
                 .and_then(Value::as_str)
-                .map(str::to_string)
+                .map(display_label)
                 .or_else(|| r.get("DocNum").and_then(Value::as_str).map(str::to_string))
                 .unwrap_or_else(|| "?".to_string());
             Some(AnswerRow { label, value })
@@ -442,6 +521,17 @@ async fn list_plan(
         plan: Some(title),
         ..Answer::default()
     })
+}
+
+/// A row label the user can read. SAP returns `2026-09-29T00:00:00Z`; a timestamp
+/// in a list of invoices is noise, so an ISO datetime is shown as its date. Any
+/// other value is passed through untouched.
+fn display_label(v: &str) -> String {
+    if v.len() > 10 && v.as_bytes().get(4) == Some(&b'-') && v.as_bytes().get(7) == Some(&b'-') {
+        v[..10].to_string()
+    } else {
+        v.to_string()
+    }
 }
 
 fn pick_label_field(set: &str) -> String {
@@ -483,12 +573,12 @@ async fn detail_plan(
             if parts.is_empty() {
                 None
             } else {
-                Some(parts.join(" Â· "))
+                Some(parts.join(" · "))
             }
         })
         .collect();
 
-    let title = format!("{} â€” detail", friendly_set(set));
+    let title = format!("{} — detail", friendly_set(set));
     let text = if lines.is_empty() {
         "No matching records.".to_string()
     } else {
@@ -618,10 +708,22 @@ fn value_text(v: Option<&Value>) -> String {
     }
 }
 
+/// Whether an item is serial- and batch-managed, read from its own record. An
+/// unreadable item is treated as unmanaged, so the form never blocks.
+async fn item_management(c: &Credentials, item: &str) -> (bool, bool) {
+    let literal = query::filter_literal(item).unwrap_or_else(|_| "''".into());
+    let url = format!("Items({literal})?$select=ManageSerialNumbers,ManageBatchNumbers");
+    let found = transport::get(c, &url).await.ok();
+    let yes = |key: &str| {
+        found.as_ref().and_then(|f| f.get(key)).and_then(Value::as_str) == Some("tYES")
+    };
+    (yes("ManageSerialNumbers"), yes("ManageBatchNumbers"))
+}
+
 /// Builds a sales or purchase document from a validated plan and returns a
 /// preview. Nothing is posted here: the app shows the preview and asks for an
 /// explicit confirm, then calls the post command.
-async fn create_plan(_c: &Credentials, plan: &Plan) -> Result<Answer, String> {
+async fn create_plan(c: &Credentials, plan: &Plan) -> Result<Answer, String> {
     let set = plan.entity_set.as_deref().unwrap_or("");
     let doc_type = documents::find_by_set(set)
         .ok_or_else(|| format!("{set} is not a document type I can create."))?;
@@ -633,6 +735,8 @@ async fn create_plan(_c: &Credentials, plan: &Plan) -> Result<Answer, String> {
             quantity: l.quantity,
             price: l.price,
             base_line: None,
+            serials: l.serial_numbers.clone(),
+            batch: l.batch_number.clone(),
         })
         .collect();
     let doc = documents::Document {
@@ -645,16 +749,29 @@ async fn create_plan(_c: &Credentials, plan: &Plan) -> Result<Answer, String> {
     };
     documents::validate(&doc)?;
 
+    // Whether each item is serial- or batch-managed decides which extra fields
+    // the form shows. The server is asked, never guessed.
+    let mut managed = Vec::with_capacity(doc.lines.len());
+    for line in &doc.lines {
+        let flags = item_management(c, &line.item_code).await;
+        managed.push(flags);
+    }
+
     // The spec the app posts after the user confirms. Carried in the answer so
     // the frontend does not have to reconstruct what the model already decided.
     let spec = serde_json::json!({
         "set": set,
         "cardCode": doc.card_code,
         "docDate": doc.doc_date,
-        "lines": doc.lines.iter().map(|l| serde_json::json!({
+        "lines": doc.lines.iter().zip(&managed).map(|(l, m)| serde_json::json!({
             "itemCode": l.item_code,
             "quantity": l.quantity,
             "price": l.price,
+            "baseLine": l.base_line,
+            "serialNumbers": l.serials,
+            "batchNumber": l.batch,
+            "manageSerial": m.0,
+            "manageBatch": m.1,
         })).collect::<Vec<_>>(),
     });
 
@@ -665,7 +782,7 @@ async fn create_plan(_c: &Credentials, plan: &Plan) -> Result<Answer, String> {
         text,
         kind: "confirm".into(),
         plan: Some(title),
-        source: "preview â€” not posted".into(),
+        source: "preview — not posted".into(),
         payload: Some(spec),
         ..Answer::default()
     })
@@ -782,7 +899,7 @@ async fn copy_plan(c: &Credentials, plan: &Plan) -> Result<Answer, String> {
                     // The base line number is what links a copied line back to
                     // its source, and is not the same as the position here.
                     let base_line = l.get("LineNum").and_then(Value::as_i64);
-                    Some(documents::Line { item_code, quantity, price, base_line })
+                    Some(documents::Line { item_code, quantity, price, base_line, serials: Vec::new(), batch: None })
                 })
                 .collect()
         })
@@ -813,7 +930,7 @@ async fn copy_plan(c: &Credentials, plan: &Plan) -> Result<Answer, String> {
         text,
         kind: "confirm".into(),
         plan: Some(title),
-        source: "preview â€” not posted".into(),
+        source: "preview — not posted".into(),
         payload: Some(spec),
         ..Answer::default()
     })
@@ -833,7 +950,7 @@ fn aggregate_rows(rows: &[Value], field: &str, op: &str, dims: Option<&[String]>
                 .iter()
                 .map(|d| r.get(d).and_then(Value::as_str).unwrap_or("?"))
                 .collect::<Vec<_>>()
-                .join("Â·");
+                .join("·");
             *map.entry(key).or_default() += v;
         }
     }
@@ -849,7 +966,7 @@ fn aggregate_rows(rows: &[Value], field: &str, op: &str, dims: Option<&[String]>
     }
 }
 
-// â”€â”€ titles â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// —— titles ————————————————————————————————————————————————————————————————————
 
 fn build_source(plan: &Plan, range: &Option<(String, String)>) -> String {
     let set = plan.entity_set.as_deref().unwrap_or("");
@@ -863,7 +980,7 @@ fn build_source(plan: &Plan, range: &Option<(String, String)>) -> String {
     parts.join(", ")
 }
 
-/// A friendly name for an entity set, for a human title â€” never a raw set name
+/// A friendly name for an entity set, for a human title — never a raw set name
 /// like "Invoices" when "sales" reads better, and never a field name.
 fn friendly_set(set: &str) -> &str {
     match set {
@@ -882,7 +999,7 @@ fn friendly_set(set: &str) -> &str {
     }
 }
 
-/// " last month", " last quarter" â€” appended to a title.
+/// " last month", " last quarter" — appended to a title.
 fn time_label(w: Option<planner::TimeWindow>) -> &'static str {
     use planner::TimeWindow::*;
     match w {
@@ -897,7 +1014,7 @@ fn time_label(w: Option<planner::TimeWindow>) -> &'static str {
         Some(ThisYear) => " this year",
         Some(LastYear) => " last year",
         Some(Last30Days) => " the last 30 days",
-        Some(All) | None => "",
+        Some(planner::TimeWindow::All) | None => "",
     }
 }
 
@@ -926,7 +1043,12 @@ fn title_for(plan: &Plan) -> String {
     } else {
         format!("Total {}", friendly_set(set).to_lowercase())
     };
-    format!("{base}{}", time_label(plan.time_window))
+    // An explicit range is named by its own dates; the symbolic window names itself.
+    let period = match explicit_range(plan) {
+        Some((start, end)) => format!(" {start} to {end}"),
+        None => time_label(plan.time_window).to_string(),
+    };
+    format!("{base}{period}")
 }
 
 async fn partner_names(c: &Credentials) -> Result<HashMap<String, String>, String> {
@@ -980,6 +1102,65 @@ mod tests {
         assert_eq!(money(0.0), "0.00");
     }
 
+    /// "q3" and "3rd quarter" have no TimeWindow, so the plan carries the dates.
+    #[test]
+    fn an_explicit_range_wins_over_the_symbolic_window() {
+        let plan = Plan {
+            kind: "aggregate".into(),
+            entity_set: Some("Invoices".into()),
+            metrics: vec![MetricSpec { field: "DocTotal".into(), op: "sum".into(), alias: "Total".into() }],
+            time_window: Some(planner::TimeWindow::ThisQuarter),
+            from: Some("2026-07-01".into()),
+            to: Some("2026-09-30".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_range(&plan),
+            Some(("2026-07-01".to_string(), "2026-09-30".to_string()))
+        );
+        assert_eq!(title_for(&plan), "Total sales 2026-07-01 to 2026-09-30");
+    }
+
+    #[test]
+    fn a_nonsense_or_half_given_range_falls_back_to_the_window() {
+        let bad = Plan {
+            time_window: Some(planner::TimeWindow::LastQuarter),
+            from: Some("2026-02-30".into()),
+            to: Some("2026-09-30".into()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_range(&bad), dates::range(planner::TimeWindow::LastQuarter));
+
+        let half = Plan { from: Some("2026-07-01".into()), ..Default::default() };
+        assert_eq!(resolve_range(&half), None);
+
+        let swapped = Plan {
+            from: Some("2026-09-30".into()),
+            to: Some("2026-07-01".into()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_range(&swapped), None);
+    }
+
+    #[test]
+    fn iso_dates_must_be_real_days() {
+        assert!(is_iso_date("2026-07-01"));
+        assert!(is_iso_date("2024-02-29"));
+        assert!(!is_iso_date("2026-02-29"));
+        assert!(!is_iso_date("2026-13-01"));
+        assert!(!is_iso_date("2026-07-1"));
+        assert!(!is_iso_date("Q3 2026"));
+        assert!(!is_iso_date(""));
+    }
+
+    #[test]
+    fn a_timestamp_label_shows_only_its_date() {
+        assert_eq!(display_label("2026-09-29T00:00:00Z"), "2026-09-29");
+        assert_eq!(display_label("2026-09-29"), "2026-09-29");
+        assert_eq!(display_label("B2B - Northwind"), "B2B - Northwind");
+        assert_eq!(display_label("1482"), "1482");
+    }
+
     #[test]
     fn count_reads_number_or_string() {
         assert_eq!(count_value(&serde_json::json!(1406)), 1406);
@@ -1025,6 +1206,8 @@ mod tests {
                 metrics: vec![MetricSpec { field: "DocTotal".into(), op: "sum".into(), alias: "Total".into() }],
                 filter: vec![],
                 time_window: w,
+                from: None,
+                to: None,
                 card_code: None,
                 doc_date: None,
                 lines: vec![],
@@ -1181,6 +1364,46 @@ mod tests {
         assert!(receipt["DocEntry"].as_i64().unwrap_or(0) > 0);
     }
 
+    /// A named quarter is not a TimeWindow, so it arrives as from/to. This is the
+    /// path "q3" and "3rd quarter 2026" take once the planner computes the dates.
+    #[test]
+    #[ignore = "reads the live Service Layer"]
+    fn live_named_quarter_matches_the_seeded_total() {
+        let c = super::super::credentials_from_secrets().expect("SAP credentials");
+        let plan = Plan {
+            kind: "aggregate".into(),
+            entity_set: Some("Invoices".into()),
+            metrics: vec![MetricSpec { field: "DocTotal".into(), op: "sum".into(), alias: "Total".into() }],
+            from: Some("2026-07-01".into()),
+            to: Some("2026-09-30".into()),
+            ..Default::default()
+        };
+        let answer = tauri::async_runtime::block_on(execute(&c, &plan)).expect("aggregate");
+        println!("q3 total={:?} source={}", answer.total, answer.source);
+        assert!(
+            (answer.total.unwrap_or(0.0) - 92053.20).abs() < 0.01,
+            "Q3 must be 92053.20"
+        );
+    }
+
+    /// The aggregate path over the live server. Before paging was added this
+    /// summed only the first page of rows, so "last quarter" came back 0.
+    #[test]
+    #[ignore = "reads the live Service Layer"]
+    fn live_last_quarter_total_is_not_zero() {
+        let c = super::super::credentials_from_secrets().expect("SAP credentials");
+        let plan = Plan {
+            kind: "aggregate".into(),
+            entity_set: Some("Invoices".into()),
+            metrics: vec![MetricSpec { field: "DocTotal".into(), op: "sum".into(), alias: "Total".into() }],
+            time_window: Some(planner::TimeWindow::LastQuarter),
+            ..Default::default()
+        };
+        let answer = tauri::async_runtime::block_on(execute(&c, &plan)).expect("aggregate");
+        println!("total={:?} source={}", answer.total, answer.source);
+        assert!(answer.total.unwrap_or(0.0) > 0.0, "last quarter summed to zero");
+    }
+
     /// Dumps the company's `$metadata` to a file so the catalogue generator can
     /// enumerate every endpoint, including the ones no feature uses yet.
     #[test]
@@ -1198,4 +1421,5 @@ mod tests {
         println!("wrote {} bytes: {sets} entity sets, {types} entity types -> {}", xml.len(), path.display());
     }
 }
+
 

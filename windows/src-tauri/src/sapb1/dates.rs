@@ -80,6 +80,18 @@ fn quarter_start(y: i32, m: u32) -> (i32, u32, u32) {
 /// `None` means no date bound (all time).
 pub fn range(window: crate::sapb1::planner::TimeWindow) -> Option<(String, String)> {
     let (y, m, d) = today_ymd();
+    range_on(window, y, m, d)
+}
+
+/// The same, against a fixed day, so the arithmetic can be tested exactly. Every
+/// window is bounded by real dates; the end is the last day of the period, in the
+/// month the period actually ends in.
+fn range_on(
+    window: crate::sapb1::planner::TimeWindow,
+    y: i32,
+    m: u32,
+    d: u32,
+) -> Option<(String, String)> {
     match window {
         crate::sapb1::planner::TimeWindow::Today => Some((fmt(y, m, d), fmt(y, m, d))),
         crate::sapb1::planner::TimeWindow::Yesterday => {
@@ -104,21 +116,22 @@ pub fn range(window: crate::sapb1::planner::TimeWindow) -> Option<(String, Strin
         }
         crate::sapb1::planner::TimeWindow::LastMonth => {
             let (py, pm) = shift_month(y, m, -1);
-            let (ey, em, ed) = (y, m, 1);
-            let (_, _, ed) = add_days(ey, em, ed, -1);
-            Some((fmt(py, pm, 1), fmt(y, m, ed)))
+            // The end is the day before this month began; the month it lands in
+            // is part of the answer, so it is not discarded.
+            let (ey, em, ed) = add_days(y, m, 1, -1);
+            Some((fmt(py, pm, 1), fmt(ey, em, ed)))
         }
         crate::sapb1::planner::TimeWindow::ThisQuarter => {
             let (sy, sm, _) = quarter_start(y, m);
             let (ny, nm) = shift_month(sy, sm, 3);
-            let (_, _, ed) = add_days(ny, nm, 1, -1);
-            Some((fmt(sy, sm, 1), fmt(ny, nm, ed)))
+            let (ey, em, ed) = add_days(ny, nm, 1, -1);
+            Some((fmt(sy, sm, 1), fmt(ey, em, ed)))
         }
         crate::sapb1::planner::TimeWindow::LastQuarter => {
             let (sy, sm, _) = quarter_start(y, m);
-            let (qy, qm) = shift_month(sy, sm, -3);
-            let (_, _, ed) = add_days(sy, sm, 1, -1);
-            Some((fmt(qy, qm, 1), fmt(sy, sm, ed)))
+            let (py, pm) = shift_month(sy, sm, -3);
+            let (ey, em, ed) = add_days(sy, sm, 1, -1);
+            Some((fmt(py, pm, 1), fmt(ey, em, ed)))
         }
         crate::sapb1::planner::TimeWindow::ThisYear => Some((fmt(y, 1, 1), fmt(y, 12, 31))),
         crate::sapb1::planner::TimeWindow::LastYear => {
@@ -177,5 +190,18 @@ mod tests {
         let (start, end) = range.unwrap();
         assert!(start < end, "{start} must be before {end}");
         assert!(start.len() == 10 && end.len() == 10);
+    }
+
+    #[test]
+    fn the_quarters_and_months_end_on_their_real_last_day() {
+        use crate::sapb1::planner::TimeWindow::*;
+        // 2026-10-04: last quarter is Jul-Sep, this quarter is Oct-Dec.
+        assert_eq!(range_on(LastQuarter, 2026, 10, 4), Some(("2026-07-01".into(), "2026-09-30".into())));
+        assert_eq!(range_on(ThisQuarter, 2026, 10, 4), Some(("2026-10-01".into(), "2026-12-31".into())));
+        assert_eq!(range_on(LastMonth, 2026, 10, 4), Some(("2026-09-01".into(), "2026-09-30".into())));
+        // A January date, so last quarter is the previous year's Q4.
+        assert_eq!(range_on(LastQuarter, 2026, 1, 15), Some(("2025-10-01".into(), "2025-12-31".into())));
+        // A quarter that ends in a 30-day month.
+        assert_eq!(range_on(ThisQuarter, 2026, 4, 2), Some(("2026-04-01".into(), "2026-06-30".into())));
     }
 }

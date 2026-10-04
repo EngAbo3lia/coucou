@@ -257,6 +257,13 @@ export interface SapB1LineSpec {
    *  untouched: Business One reads price, tax and currency from the base
    *  document, so a copy must not be rebuilt by hand. */
   baseLine?: number | null;
+  /** Serial numbers for a serial-managed item, one per unit. */
+  serialNumbers?: string[];
+  /** A batch number for a batch-managed item. */
+  batchNumber?: string | null;
+  /** Whether the item is managed, so the form shows the right inputs. */
+  manageSerial?: boolean;
+  manageBatch?: boolean;
 }
 
 /** The document spec the planner returns with a create/copy preview, and that

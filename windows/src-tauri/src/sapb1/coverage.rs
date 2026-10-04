@@ -398,6 +398,8 @@ for set in document_sets() {
                                 quantity: (i + 1) as f64,
                                 price: priced.then_some(10.5 * (i + 1) as f64),
                                 base_line: None,
+                                serials: Vec::new(),
+                                batch: None,
                             })
                             .collect();
                         let spec = documents::Document {
@@ -429,7 +431,7 @@ doc_date: dated.then(|| "2015-01-22".to_string()),
     #[test]
     fn validation_matrix_rejects_every_bad_document() {
         let doc = &documents::DOCUMENT_TYPES[0];
-        let good_line = Line { item_code: "A00001".into(), quantity: 1.0, price: Some(1.0), base_line: None };
+        let good_line = Line { item_code: "A00001".into(), quantity: 1.0, price: Some(1.0), base_line: None, serials: Vec::new(), batch: None };
         let cases: Vec<(&str, documents::Document)> = vec![
             (
                 "no customer",
@@ -443,7 +445,7 @@ doc_date: dated.then(|| "2015-01-22".to_string()),
                 "line without an item",
                 documents::Document {
                     card_code: "C70000".into(),
-                    lines: vec![Line { item_code: String::new(), quantity: 1.0, price: None, base_line: None }],
+                    lines: vec![Line { item_code: String::new(), quantity: 1.0, price: None, base_line: None, serials: Vec::new(), batch: None }],
                     ..blank(doc)
                 },
             ),
@@ -451,7 +453,7 @@ doc_date: dated.then(|| "2015-01-22".to_string()),
                 "zero quantity",
                 documents::Document {
                     card_code: "C70000".into(),
-                    lines: vec![Line { item_code: "A00001".into(), quantity: 0.0, price: None, base_line: None }],
+                    lines: vec![Line { item_code: "A00001".into(), quantity: 0.0, price: None, base_line: None, serials: Vec::new(), batch: None }],
                     ..blank(doc)
                 },
             ),
@@ -459,7 +461,7 @@ doc_date: dated.then(|| "2015-01-22".to_string()),
                 "negative quantity",
                 documents::Document {
                     card_code: "C70000".into(),
-                    lines: vec![Line { item_code: "A00001".into(), quantity: -3.0, price: None, base_line: None }],
+                    lines: vec![Line { item_code: "A00001".into(), quantity: -3.0, price: None, base_line: None, serials: Vec::new(), batch: None }],
                     ..blank(doc)
                 },
             ),
@@ -469,7 +471,7 @@ doc_date: dated.then(|| "2015-01-22".to_string()),
                     card_code: "C70000".into(),
                     lines: vec![
                         good_line.clone(),
-                        Line { item_code: "A00002".into(), quantity: -1.0, price: None, base_line: None },
+                        Line { item_code: "A00002".into(), quantity: -1.0, price: None, base_line: None, serials: Vec::new(), batch: None },
                     ],
                     ..blank(doc)
                 },
@@ -492,7 +494,7 @@ doc_date: dated.then(|| "2015-01-22".to_string()),
                     card_code: "C70000".into(),
                     doc_date: None,
                     due_date: doc.needs_due_date.then(|| "2015-02-22".to_string()),
-                    lines: vec![Line { item_code: "A00001".into(), quantity, price: None, base_line: None }],
+                    lines: vec![Line { item_code: "A00001".into(), quantity, price: None, base_line: None, serials: Vec::new(), batch: None }],
                     base: None,
                 };
                 assert!(documents::validate(&spec).is_ok(), "{} rejected {quantity}", doc.kind);
@@ -513,8 +515,8 @@ doc_date: dated.then(|| "2015-01-22".to_string()),
                 doc_date: Some("2015-01-22".into()),
                 due_date: doc.needs_due_date.then(|| "2015-02-22".to_string()),
                 lines: vec![
-                    Line { item_code: "A00001".into(), quantity: 2.0, price: Some(300.0), base_line: None },
-                    Line { item_code: "A00002".into(), quantity: 1.0, price: None, base_line: None },
+                    Line { item_code: "A00001".into(), quantity: 2.0, price: Some(300.0), base_line: None, serials: Vec::new(), batch: None },
+                    Line { item_code: "A00002".into(), quantity: 1.0, price: None, base_line: None, serials: Vec::new(), batch: None },
                 ],
                 base: None,
             };
@@ -600,5 +602,6 @@ doc_date: dated.then(|| "2015-01-22".to_string()),
 fn blank(doc: &'static documents::DocumentType) -> documents::Document {
     documents::Document { doc_type: doc, card_code: String::new(), doc_date: None, due_date: None, lines: Vec::new(), base: None }
 }
+
 
 

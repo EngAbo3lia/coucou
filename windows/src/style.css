@@ -1721,3 +1721,5 @@ input[type="range"]::-webkit-slider-thumb {
 .confirm-label { font: 400 10.5px var(--font); color: var(--dim-3); }
 .confirm-form .confirm-input { text-align: left; }
 .confirm-form select.confirm-input { appearance: auto; }
+/* A serial/batch input sits under its line, spanning the row. */
+.confirm-subline { margin-top: 4px; text-align: left; grid-column: 1 / -1; }

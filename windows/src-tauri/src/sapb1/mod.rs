@@ -116,6 +116,17 @@ pub fn credentials_from_secrets() -> Result<Credentials, String> {
     })
 }
 
+/// Reads serial numbers from a spec field: an array of strings, or one
+/// comma-separated string. Blank segments are dropped.
+fn parse_serials(v: Option<&Value>) -> Vec<String> {
+    let raw: Vec<String> = match v {
+        Some(Value::Array(a)) => a.iter().filter_map(Value::as_str).map(str::to_string).collect(),
+        Some(Value::String(s)) => s.split(',').map(str::to_string).collect(),
+        _ => Vec::new(),
+    };
+    raw.into_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+}
+
 /// Creates a sales or purchase document. Called by the app only after the user
 /// confirms the preview shown in the chat. `spec` is the shape the planner
 /// carried in the `payload` field: `{set, cardCode, docDate, lines[]}`.
@@ -141,7 +152,14 @@ pub async fn create_document(c: &Credentials, spec: &Value) -> Result<Value, Str
                     let quantity = l.get("quantity").and_then(Value::as_f64).unwrap_or(0.0);
                     let price = l.get("price").and_then(Value::as_f64);
                     let base_line = l.get("baseLine").and_then(Value::as_i64);
-                    Some(documents::Line { item_code, quantity, price, base_line })
+                    Some(documents::Line {
+                        item_code,
+                        quantity,
+                        price,
+                        base_line,
+                        serials: parse_serials(l.get("serialNumbers")),
+                        batch: l.get("batchNumber").and_then(Value::as_str).map(str::to_string),
+                    })
                 })
                 .collect()
         })
@@ -202,6 +220,8 @@ pub async fn write_entity(
                         quantity: l.get("quantity").and_then(Value::as_f64).unwrap_or(0.0),
                         price: l.get("price").and_then(Value::as_f64),
                         base_line: None,
+                        serials: parse_serials(l.get("serialNumbers")),
+                        batch: l.get("batchNumber").and_then(Value::as_str).map(str::to_string),
                     })
                 })
                 .collect()
@@ -461,3 +481,4 @@ mod tests {
         );
     }
 }
+

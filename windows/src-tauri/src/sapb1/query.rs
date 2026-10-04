@@ -1,4 +1,4 @@
-﻿//! What the Service Layer will and will not do, and the query strings that come
+//! What the Service Layer will and will not do, and the query strings that come
 //! out of it.
 //!
 //! The rules below were verified against a live FP 3400 server, not read off a
@@ -10,6 +10,11 @@
 /// caller still pages or filters when it needs more.
 pub const ROW_CAP: usize = 5000;
 
+/// How many rows to ask for in one request. The server caps a page well below
+/// this (20 on the verified install) and returns `odata.nextLink`; the caller
+/// pages with `$skip`, so this is a request, never a guarantee.
+pub const PAGE: usize = 500;
+
 /// Builds the read URL for an entity set.
 ///
 /// `select` may be empty, in which case the row cap alone is sent: some servers
@@ -20,6 +25,22 @@ pub fn build_list_url(set: &str, select: &[String], top: usize) -> String {
         return format!("{set}?$top={top}");
     }
     format!("{set}?$select={}&$top={top}", select.join(","))
+}
+
+/// The read URL for one page. `$skip` applies before `$top`, and the server
+/// caps the page regardless of the `$top` asked for, so paging is mandatory for
+/// anything larger than one page.
+pub fn build_page_url(set: &str, select: &[String], top: usize, skip: usize) -> String {
+    let base = if select.is_empty() {
+        format!("{set}?$top={top}")
+    } else {
+        format!("{set}?$select={}&$top={top}", select.join(","))
+    };
+    if skip == 0 {
+        base
+    } else {
+        format!("{base}&$skip={skip}")
+    }
 }
 
 /// Builds the `$count` URL, optionally with an already-rendered filter clause.
@@ -131,7 +152,7 @@ pub const CAPABILITIES: &[Capability] = &[
         option: "$count",
         example: "Invoices/$count?$filter=DocDate ge 2024-01-01",
         support: Support::Works,
-        note: "Exact count, and it does accept $filter â€” unlike $apply.",
+        note: "Exact count, and it does accept $filter — unlike $apply.",
     },
     Capability {
         option: "$expand (single-entity navigation)",
@@ -300,6 +321,14 @@ pub fn is_report_field(set: &str, field: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_page_url_carries_its_skip_only_when_asked() {
+        let select = vec!["DocNum".to_string(), "DocDate".to_string()];
+        assert_eq!(build_page_url("Invoices", &select, 500, 0), "Invoices?$select=DocNum,DocDate&$top=500");
+        assert_eq!(build_page_url("Invoices", &select, 500, 20), "Invoices?$select=DocNum,DocDate&$top=500&$skip=20");
+        assert_eq!(build_page_url("Invoices", &[], 500, 40), "Invoices?$top=500&$skip=40");
+    }
 
     #[test]
     fn group_by_builds_the_verified_shape() {

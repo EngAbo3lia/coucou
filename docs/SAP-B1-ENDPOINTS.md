@@ -263,3 +263,22 @@ Ground truth for the chat, as of this seed: **Q3 2026 (2026-07-01 .. 2026-09-30)
 = 107 invoices, 92,053.20 GBP** net (the 100 seeded plus 7 from earlier runs).
 A correct answer to "sales last quarter" must match that.
 
+### Two bugs that made that total read zero
+
+Found by testing the seed against the real chat, both fixed:
+
+1. **The page is capped at 20 rows.** `Invoices?$top=5000` returns 20 rows and an
+   `odata.nextLink`; the rest are only reachable with `$skip`. A single read
+   therefore saw the oldest 2015 invoices and summed the quarter to `0`.
+   `fetch_rows` now pages (`query::build_page_url`) until the rows run out or
+   `ROW_CAP` is reached.
+2. **The window's end day was formatted in the wrong month.** `LastQuarter` took
+   the day of `2026-09-30` and printed it as `2026-10-30`, and `LastMonth`/
+   `ThisQuarter` had the same fault. The day and its month now come from the same
+   computed date. Separately, a `DocDate` of `2026-09-30T00:00:00Z` compared
+   against the bound `2026-09-30` sorted *after* it (the `T`), dropping the last
+   day; both sides are trimmed to `YYYY-MM-DD` before comparing.
+
+After both fixes, `live_last_quarter_total_is_not_zero` reports
+`total=92053.20, source=Invoices, 2026-07-01..2026-09-30`.
+

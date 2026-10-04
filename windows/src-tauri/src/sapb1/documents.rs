@@ -65,6 +65,11 @@ pub struct Line {
     pub price: Option<f64>,
     /// The line number this line copies from, set only on a copy.
     pub base_line: Option<i64>,
+    /// Serial numbers for a serial-managed item: one per unit.
+    pub serials: Vec<String>,
+    /// A batch number for a batch-managed item; the whole line quantity is
+    /// allocated to it unless the user splits it later.
+    pub batch: Option<String>,
 }
 
 /// A document the assistant wants to create, before it is posted.
@@ -118,6 +123,25 @@ pub fn build_payload(doc: &Document) -> Value {
                 obj.insert("BaseEntry".into(), json!(base.entry));
                 obj.insert("BaseLine".into(), json!(l.base_line.unwrap_or(0)));
                 obj.insert("BaseType".into(), json!(base.base_type));
+            }
+            // A batch-managed item rejects the line without its numbers
+            // (`-4014 Cannot add row without complete selection`), so the whole
+            // quantity is allocated to the batch the user gave.
+            if let Some(batch) = l.batch.as_ref().filter(|b| !b.trim().is_empty()) {
+                obj.insert(
+                    "BatchNumbers".into(),
+                    json!([{ "BatchNumber": batch.trim(), "Quantity": l.quantity }]),
+                );
+            }
+            let serials: Vec<Value> = l
+                .serials
+                .iter()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(|s| json!({ "SerialNumber": s, "Quantity": 1.0 }))
+                .collect();
+            if !serials.is_empty() {
+                obj.insert("SerialNumbers".into(), json!(serials));
             }
             Value::Object(obj)
         })
@@ -179,7 +203,7 @@ mod tests {
             card_code: "C0001".into(),
             doc_date: Some("2026-10-04".into()),
             due_date: Some("2026-11-03".into()),
-            lines: vec![Line { item_code: "A00001".into(), quantity: 2.0, price: Some(100.0), base_line: None }],
+            lines: vec![Line { item_code: "A00001".into(), quantity: 2.0, price: Some(100.0), base_line: None, serials: Vec::new(), batch: None }],
             base: None,
         }
     }
@@ -235,8 +259,8 @@ mod tests {
         let mut d = doc();
         d.base = Some(BaseDocument { entry: 1260, base_type: 17 });
         d.lines = vec![
-            Line { item_code: "A00001".into(), quantity: 2.0, price: None, base_line: Some(0) },
-            Line { item_code: "A00002".into(), quantity: 1.0, price: None, base_line: Some(1) },
+            Line { item_code: "A00001".into(), quantity: 2.0, price: None, base_line: Some(0), serials: Vec::new(), batch: None },
+            Line { item_code: "A00002".into(), quantity: 1.0, price: None, base_line: Some(1), serials: Vec::new(), batch: None },
         ];
         let v = build_payload(&d);
         for (i, line) in v["DocumentLines"].as_array().unwrap().iter().enumerate() {
@@ -244,6 +268,41 @@ mod tests {
             assert_eq!(line["BaseLine"], json!(i as i64), "line {i} has the wrong base line");
             assert_eq!(line["BaseType"], json!(17), "line {i} has the wrong base type");
         }
+    }
+
+    #[test]
+    fn a_batch_line_allocates_its_quantity_to_the_batch() {
+        let mut d = doc();
+        d.lines = vec![Line {
+            item_code: "B10000".into(),
+            quantity: 10.0,
+            price: None,
+            base_line: None,
+            serials: Vec::new(),
+            batch: Some("LOT-1".into()),
+        }];
+        let v = build_payload(&d);
+        assert_eq!(v["DocumentLines"][0]["BatchNumbers"][0]["BatchNumber"], "LOT-1");
+        assert_eq!(v["DocumentLines"][0]["BatchNumbers"][0]["Quantity"], 10.0);
+        assert!(v["DocumentLines"][0].get("SerialNumbers").is_none());
+    }
+
+    #[test]
+    fn a_serial_line_emits_one_entry_per_unit() {
+        let mut d = doc();
+        d.lines = vec![Line {
+            item_code: "S1".into(),
+            quantity: 2.0,
+            price: None,
+            base_line: None,
+            serials: vec!["SN-1".into(), "SN-2".into()],
+            batch: None,
+        }];
+        let v = build_payload(&d);
+        let serials = v["DocumentLines"][0]["SerialNumbers"].as_array().unwrap();
+        assert_eq!(serials.len(), 2);
+        assert_eq!(serials[0]["SerialNumber"], "SN-1");
+        assert_eq!(serials[1]["SerialNumber"], "SN-2");
     }
 
     #[test]
@@ -275,3 +334,4 @@ mod tests {
         assert!(p.contains("A00001"));
     }
 }
+
